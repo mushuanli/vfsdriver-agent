@@ -213,3 +213,5 @@ nor consumes the draft when native admission arrives. The pending journal stores
 even when the next draft has identical text. Legacy direct sends keep their existing
 revision and input matching rules. Queue admission and the host OperationLedger remain
 the authority for consuming the submitted editor draft.
+
+文件 HTTP 错误保留标准 VFS `code`，并以 `remoteCode` 传递经过格式校验的服务端原因（如 `METADATA_IO`）。只有状态码或服务端错误码时，默认提示包含二者，便于区分网络连接失败与已送达的服务端异常。

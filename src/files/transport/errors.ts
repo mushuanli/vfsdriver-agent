@@ -2,7 +2,7 @@ import { FSError, type FSErrorCode } from '@itookit/vfs-core';
 import { boundedBody } from './body';
 
 export class HttpResponseError extends FSError {
-    constructor(code: FSErrorCode, message: string, readonly status: number) { super(code, message); }
+    constructor(code: FSErrorCode, message: string, readonly status: number, readonly remoteCode?: string) { super(code, message); }
     get httpStatus(): number { return this.status; }
 }
 
@@ -12,8 +12,9 @@ export async function responseError(response: Response): Promise<FSError> {
         const payload = JSON.parse(new TextDecoder().decode(await boundedBody(response, 64 * 1024))) as { code?: unknown; message?: unknown };
         declared = payload.code; message = payload.message;
     } catch { /* an empty body or an HTML proxy response: the status code is the only evidence */ }
+    const detail = typeof declared === 'string' && /^[A-Z][A-Z0-9_]{1,79}$/.test(declared) ? declared : undefined;
     return new HttpResponseError(remoteCode(declared, statusCode(response.status)),
-        typeof message === 'string' && message ? message : `File server returned ${response.status}`, response.status);
+        typeof message === 'string' && message ? message : `File server returned ${response.status}${detail ? ` (${detail})` : ''}`, response.status, detail);
 }
 
 const STATUS_CODES: Record<number, FSErrorCode> = { 400: 'EINVAL', 401: 'EACCES', 403: 'EACCES', 404: 'ENOENT', 409: 'EEXIST',
