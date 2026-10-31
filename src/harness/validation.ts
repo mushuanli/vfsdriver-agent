@@ -1,6 +1,7 @@
 import {validateExecutionRecovery} from './execution-recovery';
 import {terminalTurn} from './history-completion';
 import { FSError } from '@itookit/vfs-core';
+import {validateMetrics} from './metrics';
 import { validateUsage } from './usage';
 import {validateWriterLock} from './writer-lock';
 import type { HarnessEvents, HarnessHistory, HarnessPage, HarnessProfile, HarnessReceipt, HarnessSession } from './contracts';
@@ -14,6 +15,13 @@ function sessionTime(value: unknown): number | null {
     const time = typeof value === 'number' ? value >= 1_000_000_000 && value < 100_000_000_000 ? value * 1000 : value
         : typeof value === 'string' ? Date.parse(value) : NaN;
     return Number.isFinite(time) && time > 0 && time <= 8_640_000_000_000_000 ? time : null;
+}
+function readSessionMetrics(value: unknown) {
+    if (value === undefined) return;
+    try {return validateMetrics(value);} catch {
+        try {console.warn('[Harness] Optional session metrics unavailable', {operation: 'harness.metrics', stage: 'decode-session', code: 'HARNESS_METRICS_INVALID'});} catch { /* Optional diagnostics cannot block history. */ }
+        return undefined;
+    }
 }
 export function validateSession(value: unknown): HarnessSession {
     const v = record(value);
@@ -40,7 +48,7 @@ export function validateSession(value: unknown): HarnessSession {
     const usage = v.usage === undefined ? undefined : validateUsage(v.usage, v.id as string);
     if (v.usageUnavailable !== undefined && typeof v.usageUnavailable !== 'boolean') throw invalid();
     const native = v.native && typeof v.native === 'object' ? v.native as Record<string, unknown> : {};
-    return {...v, executionRecovery: validateExecutionRecovery(v.executionRecovery), usage, writerLock: validateWriterLock(v.writerLock), title: [v.title, native.name, native.preview].find(text => typeof text === 'string' && text.trim())?.toString().trim() ?? '',
+    return {...v, executionRecovery: validateExecutionRecovery(v.executionRecovery), usage, metrics: readSessionMetrics(v.metrics), writerLock: validateWriterLock(v.writerLock), title: [v.title, native.name, native.preview].find(text => typeof text === 'string' && text.trim())?.toString().trim() ?? '',
         lastTurnResult: v.lastTurnResult ?? undefined,
         createdAt: sessionTime(v.createdAt ?? native.createdAt), updatedAt: sessionTime(v.updatedAt ?? native.updatedAt)} as unknown as HarnessSession;
 }
@@ -54,7 +62,7 @@ export function validateProfiles(value: unknown): { epoch: string; profiles: Har
             || p.workspaces.some(w => typeof record(w).id !== 'string')
             || (caps.fork !== undefined && typeof caps.fork !== 'boolean')
             || (caps.search !== undefined && typeof caps.search !== 'boolean')
-            || ['executionRecovery', 'models', 'slashCommands', 'commandQueries', 'commandOutputs', 'usage', 'checkpointFork', 'searchPrompts', 'searchKeywords', 'rename', 'archive', 'unarchive', 'delete'].some(key => caps[key] !== undefined && typeof caps[key] !== 'boolean')
+            || ['executionRecovery', 'sessionDigest', 'metrics', 'steer', 'models', 'slashCommands', 'commandQueries', 'commandOutputs', 'usage', 'checkpointFork', 'searchPrompts', 'searchKeywords', 'rename', 'archive', 'unarchive', 'delete'].some(key => caps[key] !== undefined && typeof caps[key] !== 'boolean')
             || caps.checkpointFork === true && caps.fork !== true
             || caps.commandQueries === true && caps.slashCommands !== true
             || caps.commandOutputs === true && caps.slashCommands !== true

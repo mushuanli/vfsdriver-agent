@@ -1,5 +1,6 @@
 import {detachedExecution} from './execution-recovery';
 import {HarnessActivityTracker} from './activity';
+import {observeContextMetrics, validateMetrics, type HarnessMetrics} from './metrics';
 import {recoverHistoryCompletions} from './history-completion';
 import {validateModels, validateModelSelection, validateAvailableSelection} from './models';
 import {HarnessControlLedger, type HarnessInterruptRequest} from './control-ledger';
@@ -30,21 +31,52 @@ export class HarnessConversation implements HarnessConversationPort {
     private readonly activity = new HarnessActivityTracker();
     private historyRevision?: string;
     private contentSinceInspect = false;
+    private metricsValue?: HarnessMetrics;
+    private contextRevision = 0;
+    private metricsError?: {code: string};
+    private metricsRead?: Promise<HarnessConversationSnapshot>;
+    refreshMetrics(): Promise<HarnessConversationSnapshot> {
+        return this.metricsRead ??= this.readMetrics().finally(() => {this.metricsRead = undefined;});
+    }
+    private async readMetrics(): Promise<HarnessConversationSnapshot> {
+        await this.restore(); const sessionId = this.session?.id, started = Date.now(), operationId = createRequestId();
+        if (!sessionId || !this.profile.capabilities.metrics || !this.client.metrics) return this.snapshot();
+        const contextRevision = this.contextRevision;
+        try {
+            const value = await this.client.metrics(this.profile.id, sessionId, {...this.options(), requestId: operationId});
+            this.lifetime.signal.throwIfAborted();
+            if (this.session?.id !== sessionId || this.navigationSessionId || this.deletedSessionIds.length) throw new FSError('ECONFLICT', 'Native metrics target changed');
+            const next = validateMetrics(value);
+            if (contextRevision !== this.contextRevision) {
+                next.contextWindow = this.metricsValue?.contextWindow;
+                if (next.errors) delete next.errors.context;
+            }
+            this.metricsValue = next; this.metricsError = undefined;
+            try {console.info('[Harness] Metrics read', {operation: 'harness.metrics', operationId, sessionId, stage: 'read', result: 'success', durationMs: Date.now() - started});} catch { /* Metrics diagnostics do not own execution. */ }
+        } catch (error) {
+            const raw = (error as {remoteCode?: string; code?: string})?.remoteCode ?? (error as {code?: string})?.code;
+            const code = raw && /^[A-Z][A-Z0-9_]{0,79}$/.test(raw) ? raw : 'HARNESS_METRICS_UNAVAILABLE';
+            this.metricsError = {code};
+            try {console.warn('[Harness] Metrics unavailable', {operation: 'harness.metrics', operationId, sessionId, stage: 'read', result: 'failure', code, durationMs: Date.now() - started});} catch { /* Keep metrics failures local. */ }
+        }
+        this.notify(); return this.snapshot();
+    }
     private readonly queries: HarnessCommandQueries;
     private readonly instructions: HarnessInstructionRuntime;
     private readonly controls: HarnessControlLedger;
     private readonly localListeners = new Set<() => void>();
-    async enqueue(text: string, attachments: HarnessAttachment[] = [], selection?: HarnessModelSelection, submissionId = createRequestId()) {
+    async enqueue(text: string, attachments: HarnessAttachment[] = [], selection?: HarnessModelSelection, submissionId = createRequestId(), delivery: 'auto' | 'next-turn' = 'next-turn') {
         await this.restore();
         if (!this.snapshot().canQueue || typeof text !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(submissionId))
             throw new FSError('EBUSY', 'Conversation cannot queue instructions');
         if (attachments.some(file => !this.profile.capabilities.attachments?.includes(file.kind))) throw new FSError('ECAPABILITY', 'Attachment kind unavailable');
+        if (!['auto', 'next-turn'].includes(delivery)) throw new FSError('EINVAL', 'Invalid queue delivery mode');
         const prepared = validateAttachments(attachments);
         const command = await this.queuedCommand(text);
         if (command?.execution === 'query') throw new FSError('EINVAL', 'Query commands must use the command port');
         if (command && prepared.length) throw new FSError('ECAPABILITY', 'Native commands cannot include attachments');
         const selected = selection && command?.kind !== 'action' ? validateAvailableSelection(validateModelSelection(selection), await this.beforeSubmission(() => this.models())) : undefined;
-        await this.instructions.enqueue({id: submissionId, text, attachments: prepared, selection: selected, commandKind: command?.kind, commandId: command?.id, commandRevision: command?.revision, createdAt: Date.now(), state: 'pending'});
+        await this.instructions.enqueue({id: submissionId, ...(delivery === 'auto' && this.profile.capabilities.steer ? {allowSteer: true} : {}), text, attachments: prepared, selection: selected, commandKind: command?.kind, commandId: command?.id, commandRevision: command?.revision, createdAt: Date.now(), state: 'pending'});
         return {...this.snapshot(), submission: {id: submissionId, status: 'accepted' as const}, submittedTurnId: undefined};
     }
     async editInstructionQueue(edit: HarnessQueueEdit) {
@@ -107,6 +139,7 @@ export class HarnessConversation implements HarnessConversationPort {
         return {...command, arguments: parsed[2] ?? ''};
     }
     private async sendInstruction(item: HarnessInstruction): Promise<HarnessConversationSnapshot> {
+        if (item.steerTurnId) return this.steer(item.text, item.steerTurnId, item.attachments, item.attemptId ?? item.id, true);
         if (!item.commandKind) return this.sendTurn(item.text, item.attachments, item.selection, item.attemptId ?? item.id, true);
         const command = await this.queuedCommand(item.text);
         if (!command || command.kind !== item.commandKind || command.execution === 'query'
@@ -277,11 +310,11 @@ export class HarnessConversation implements HarnessConversationPort {
         const actions = this.actions(observation);
         const queue = this.instructions.projection(observation), head = this.instructions.record.items[0];
         if (this.writable && this.profile.capabilities.executionRecovery && head?.state === 'dispatching'
-            && head.receipt?.turnId && !head.commandKind && !head.terminal
+            && head.receipt?.turnId && !head.commandKind && !head.steerTurnId && !head.terminal
             && !this.turnResults.has(head.receipt.turnId) && Date.now() - (head.acceptedAt ?? head.createdAt) >= 60_000)
             queue.recovery = {id: head.id};
         observation.canInterrupt = actions.canInterrupt; observation.canRespond = actions.canRespond;
-        return {executionRecovery: this.session?.executionRecovery, resultError: commandResultIssue(this.commandResults), ...(this.profile.capabilities.models ? {supportsModels: true} : {}), ...(this.profile.capabilities.slashCommands ? {supportsSlashCommands: true} : {}), ...(this.nativeCommands.length ? {slashCommands: this.availableCommands()} : {}), usage: this.session?.usage, usageUnavailable: this.session?.usageUnavailable, observation, submission: this.submission ? {...this.submission} : undefined, submittedTurnId: this.submittedTurnId, draft: this.draft, draftAttachments: structuredClone(this.draftAttachments), sessionId: this.navigationSessionId ?? this.session?.id, title: this.session?.title.trim() || this.profile.kind,
+        return {executionRecovery: this.session?.executionRecovery, supportsSteer: !!this.profile.capabilities.steer && !!this.client.steer, metrics: this.metricsValue ?? this.session?.metrics, metricsError: this.metricsError, supportsMetrics: !!this.profile.capabilities.metrics && !!this.client.metrics, resultError: commandResultIssue(this.commandResults), ...(this.profile.capabilities.models ? {supportsModels: true} : {}), ...(this.profile.capabilities.slashCommands ? {supportsSlashCommands: true} : {}), ...(this.nativeCommands.length ? {slashCommands: this.availableCommands()} : {}), usage: this.session?.usage, usageUnavailable: this.session?.usageUnavailable, observation, submission: this.submission ? {...this.submission} : undefined, submittedTurnId: this.submittedTurnId, draft: this.draft, draftAttachments: structuredClone(this.draftAttachments), sessionId: this.navigationSessionId ?? this.session?.id, title: this.session?.title.trim() || this.profile.kind,
             attachments: this.writable ? this.profile.capabilities.attachments : undefined,
             deletedSessionIds: this.deletedSessionIds.slice(),
             archived: !!this.session?.archived,
@@ -311,10 +344,13 @@ export class HarnessConversation implements HarnessConversationPort {
             canQueryCommand: this.loaded && !this.lifetime.signal.aborted && !this.deletedSessionIds.length && !this.navigationSessionId
                 && !!this.session && !!this.profile.capabilities.commandQueries && !!this.client.queryCommand,
             canCommand: ready && available && !this.refreshError && !!this.session && !this.session.archived && !!this.profile.capabilities.slashCommands,
+            canSteer: dispatchReady && available && !!this.journal && !!this.session?.owned && !!this.session.activeTurnId
+                && !this.session.archived && !this.navigationSessionId && !!this.profile.capabilities.steer && !!this.client.steer
+                && !this.turnResults.has(this.session.activeTurnId),
             canSend: dispatchReady && settled && !this.refreshError && (create || available && resumable),
             canFork: manageable && settled && this.messages.some(message => message.role === 'user' || message.role === 'assistant') && !!this.client.fork && !!this.profile.capabilities.fork && this.session?.forkable !== false,
             canDelete: manageable && removable && !!this.client.delete && !!this.profile.capabilities.delete,
-            canRename: manageable && !!this.client.rename && !!this.profile.capabilities.rename,
+            canRename: ready && available && !!this.session && !this.navigationSessionId && !!this.client.rename && !!this.profile.capabilities.rename,
             canArchive: manageable && harnessArchiveAllowed(this.session) && !!this.client.archive && !!this.profile.capabilities.archive,
             canUnarchive: manageable && !!this.session?.archived && !!this.client.archive && !!this.profile.capabilities.unarchive,
             canInterrupt: authorized && this.loaded && available && !this.navigationSessionId && this.pending?.operation !== 'interrupt'
@@ -374,10 +410,10 @@ export class HarnessConversation implements HarnessConversationPort {
         this.submission = id ? {id, status: 'pending'} : undefined;
     }
     private acceptSubmission(turnId?: string): void {
-        if (this.submission?.status === 'pending') this.submission = {id: this.submission.id, status: 'accepted', turnId};
+        if (this.submission?.status === 'pending') this.submission = {...this.submission, status: 'accepted', turnId};
     }
     private rejectSubmission(code?: string): void {
-        if (this.submission?.status === 'pending') this.submission = {id: this.submission.id, status: 'rejected', ...(code ? {code} : {})};
+        if (this.submission?.status === 'pending') this.submission = {...this.submission, status: 'rejected', ...(code ? {code} : {})};
     }
     private async beforeSubmission<T>(read: () => Promise<T>): Promise<T> {
         try { return await read(); }
@@ -495,26 +531,36 @@ export class HarnessConversation implements HarnessConversationPort {
         }
     }
     private async native<T>(operation: string, call: (options: import('./contracts').HarnessMutationOptions) => Promise<T>,
-        submission?: {inputText: string; draftRevision: number; consumeDraft?: false}, committed?: (result: T) => void, forkCheckpoint?: ForkCheckpoint): Promise<T> {
+        submission?: {inputText: string; draftRevision: number; consumeDraft?: false; turnId?: string}, committed?: (result: T) => void, forkCheckpoint?: ForkCheckpoint): Promise<T> {
         const epoch = this.journal?.epoch ?? (await this.client.profiles(this.options())).epoch;
-        const requestId = ['turn', 'command'].includes(operation) && this.submission?.status === 'pending' ? this.submission.id : createRequestId();
+        const requestId = ['turn', 'steer', 'command'].includes(operation) && this.submission?.status === 'pending' ? this.submission.id : createRequestId();
         this.pending = {requestId, epoch, operation, ...submission, ...(forkCheckpoint ? {forkCheckpoint} : {})};
+        const started = Date.now(); let stage = 'persist-intent', failure: unknown;
         try {
             try { await this.save(); } catch (error) { this.pending = undefined; throw error; }
+            stage = 'dispatch';
             const result = await call({...this.options(), ...this.pending});
+            stage = 'persist-receipt';
             const session = (result as {session?: HarnessSession} | undefined)?.session;
             if (operation === 'delete') this.deletedSessionIds = (result as {deletedSessionIds: string[]}).deletedSessionIds;
             decodeCommittedResult({requestId, outcome: 'committed', result}, () => committed?.(result));
-            if (operation === 'turn' || operation === 'command' && !this.draftAttachments.length) this.acceptDraft(this.pending);
+            if (operation === 'turn' || operation === 'steer' || operation === 'command' && !this.draftAttachments.length) this.acceptDraft(this.pending);
             const pending = this.pending; this.pending = undefined;
             try { await this.save(operation === 'fork' ? this.session?.id : session?.id ?? this.session?.id); } catch (error) { this.pending = pending; throw error; }
             return result;
         } catch (error) {
+            failure = error;
             if (operation === 'command' && await this.captureInvalidCommand(error)) throw error;
             if ((error as {outcome?: string})?.outcome === 'not-committed') {
                 this.rejectSubmission((error as {code?: string; remoteCode?: string}).remoteCode ?? (error as {code?: string}).code); this.pending = undefined; await this.save();
             } else if (this.pending && error && typeof error === 'object' && (error as {outcome?: string}).outcome !== 'committed') Object.assign(error, {outcome: 'unknown'});
             throw error;
+        } finally {
+            const error = failure as {remoteCode?: string; code?: string; outcome?: string} | undefined;
+            const code = error?.remoteCode ?? error?.code;
+            try {console.info('[Harness] Native mutation', {operation: `harness.${operation}`, operationId: requestId, stage,
+                result: failure ? error?.outcome ?? 'failure' : 'accepted', durationMs: Date.now() - started,
+                code: code && /^[A-Z][A-Z0-9_]{0,79}$/.test(code) ? code : failure ? 'HARNESS_MUTATION_FAILED' : undefined});} catch { /* Diagnostics never change admission. */ }
         }
     }
     async read(): Promise<HarnessConversationSnapshot> {
@@ -691,6 +737,7 @@ export class HarnessConversation implements HarnessConversationPort {
     }
     private consumeEvent(method: string, params: Record<string, unknown>, at?: number) {
         if (method.startsWith('item/')) this.contentSinceInspect = true;
+        if (method === 'thread/tokenUsage/updated' && this.profile.capabilities.metrics) this.observeContext(params.tokenUsage, at);
         if (method === 'harness/command/updated' && params.threadId === this.session?.id) this.commandUpdated(params);
         if (method === 'harness/commands/updated') this.nativeCommands = validateCommands({commands: params.commands});
         const prior = this.session!;
@@ -718,6 +765,18 @@ export class HarnessConversation implements HarnessConversationPort {
             if (method === 'item/commandExecution/outputDelta') return;
             const prior = this.messages.find(m => m.id === params.itemId);
             this.replace({...prior, id: params.itemId, turnId: turnId ?? prior?.turnId, timestamp: prior?.timestamp ?? at, role: method.includes('reasoning') ? 'system' : 'assistant', text: (prior?.text ?? '') + params.delta, status: prior?.status ?? 'running'});
+        }
+    }
+    private observeContext(value: unknown, at = Date.now()): void {
+        const started = Date.now();
+        try {
+            this.metricsValue = observeContextMetrics(this.metricsValue ?? this.session?.metrics, value, at);
+            ++this.contextRevision;
+            console.info('[Harness] Context observed', {operation: 'harness.metrics', sessionId: this.session?.id, stage: 'native_event',
+                result: 'success', revision: this.contextRevision, contextAvailable: !!this.metricsValue.contextWindow, occupancyKnown: this.metricsValue.contextWindow?.usedTokens != null, durationMs: Date.now() - started});
+        } catch {
+            console.warn('[Harness] Context unavailable', {operation: 'harness.metrics', sessionId: this.session?.id, stage: 'native_event',
+                result: 'failure', code: 'HARNESS_METRICS_INVALID', durationMs: Date.now() - started});
         }
     }
     private replace(message: HarnessMessage) {
@@ -781,6 +840,27 @@ export class HarnessConversation implements HarnessConversationPort {
             });
         }).then(() => this.refreshSubmitted());
     }
+    private rejectMutation(operation: string, code: ConstructorParameters<typeof FSError>[0], message: string, operationId = createRequestId()): FSError {
+        try {console.warn('[Harness] Native mutation rejected', {operation: `harness.${operation}`, operationId, stage: 'validation', result: 'not-committed', code, durationMs: 0});} catch { /* Preserve rejection evidence. */ }
+        return Object.assign(new FSError(code, message), {outcome: 'not-committed', requestId: operationId});
+    }
+    async steer(text: string, turnId: string, attachments?: HarnessAttachment[], submissionId = createRequestId(), queued = false) {
+        const {prompt, attachments: prepared} = prepareTurnInput(text, attachments);
+        await this.restore();
+        if (!this.profile.capabilities.steer || !this.client.steer) throw this.rejectMutation('steer', 'ECAPABILITY', 'Remote harness does not support adding context to an active turn', submissionId);
+        if (this.session?.activeTurnId !== turnId) throw this.rejectMutation('steer', 'ECONFLICT', 'Native turn changed; refresh before adding context', submissionId);
+        if (!this.snapshot().canSteer) throw this.rejectMutation('steer', 'EBUSY', 'Native turn cannot accept context; refresh or queue the next instruction', submissionId);
+        if (prepared.some(file => !this.profile.capabilities.attachments?.includes(file.kind))) throw this.rejectMutation('steer', 'ECAPABILITY', 'Attachment kind unavailable', submissionId);
+        this.startSubmission(submissionId); if (!queued) this.setDraft(text, prepared);
+        this.submission = {...this.submission!, kind: 'steer', steeredFrom: turnId};
+        return this.mutate(async () => {
+            await this.native('steer', options => this.client.steer!(this.profile.id, this.session!.id, turnId, prompt, {...options, attachments: prepared}),
+                {inputText: text, draftRevision: this.draftRevision, turnId, ...(queued ? {consumeDraft: false as const} : {})}, result => {
+                    if ((result.targetTurnId ?? result.turnId) !== turnId) throw new FSError('EIO', 'Mismatched native steering turn');
+                    this.submittedTurnId = result.turnId; this.acceptSubmission(result.turnId);
+                });
+        });
+    }
     async interrupt(request?: HarnessInterruptRequest) {
         if (request?.operationId && this.controls.has(request.operationId)) {await this.controls.start({...request}); return this.snapshot();}
         const target = request ? {...request} : this.session?.activeTurnId ? {sessionId: this.session.id, turnId: this.session.activeTurnId} : undefined;
@@ -796,10 +876,25 @@ export class HarnessConversation implements HarnessConversationPort {
         await this.controls.reconcile(operationId, true);
         return this.read();
     }
+    private assertRenameAvailable(): void {
+        if (this.snapshot().canRename) return;
+        const observation = this.snapshot().observation;
+        if (this.deletedSessionIds.length || !this.session) throw this.rejectMutation('rename', 'ENOENT', 'Native conversation is unavailable or deleted');
+        if (this.lifetime.signal.aborted) throw this.rejectMutation('rename', 'EACCES', 'Native conversation viewer is closed; reopen before renaming');
+        if (this.navigationSessionId) throw this.rejectMutation('rename', 'ECONFLICT', 'Native conversation changed; open the new target before renaming');
+        if (observation.connection !== 'online') throw this.rejectMutation('rename', 'EIO', 'Remote harness is offline; reconnect before renaming');
+        if (observation.refreshError) throw this.rejectMutation('rename', 'EIO', `Native state refresh failed (${observation.refreshError.stage}: ${observation.refreshError.code}); refresh before renaming`);
+        throw this.rejectMutation('rename', 'EBUSY', 'A native submission or unresolved operation is pending; reconcile it before renaming');
+    }
     async rename(name: string) {
-        if (!this.snapshot().canRename || !name.trim() || new TextEncoder().encode(name.trim()).byteLength > 512 || /[\x00-\x1f\x7f]/.test(name)) throw new FSError('EACCES', 'Native rename unavailable');
+        if (!name.trim() || new TextEncoder().encode(name.trim()).byteLength > 512 || /[\x00-\x1f\x7f]/.test(name)) throw this.rejectMutation('rename', 'EINVAL', 'Native title must contain 1–512 UTF-8 bytes and no control characters');
+        if (!this.profile.capabilities.rename || !this.client.rename) throw this.rejectMutation('rename', 'ECAPABILITY', 'Remote harness does not support native title changes');
+        if (!this.writable) throw this.rejectMutation('rename', 'EACCES', 'Native conversation is read only');
+        if (!this.loaded || this.snapshot().observation.stale) await this.read();
+        this.assertRenameAvailable();
         return this.mutate(async () => {
-            this.session = (await this.native('rename', options => this.client.rename!(this.profile.id, this.session!.id, name.trim(), options))).session;
+            const result = await this.native('rename', options => this.client.rename!(this.profile.id, this.session!.id, name.trim(), options));
+            this.session = {...this.session!, title: result.session.title};
             this.observedAt = Date.now();
         });
     }
@@ -881,7 +976,7 @@ export class HarnessConversation implements HarnessConversationPort {
         const receipt = await this.client.operation(this.profile.id, this.pending.requestId, {...this.options(), epoch: this.pending.epoch});
         if (receipt.requestId !== this.pending.requestId) throw new FSError('EIO', 'Mismatched harness receipt');
         if (receipt.outcome === 'unknown') return this.snapshot();
-        const result = receipt.result as {session?: HarnessSession; turnId?: string; deletedSessionIds?: string[]} | undefined;
+        const result = receipt.result as {session?: HarnessSession; turnId?: string; targetTurnId?: string; deletedSessionIds?: string[]} | undefined;
         if (receipt.outcome === 'committed') {
             if (['create', 'resume', 'rename', 'archive', 'unarchive'].includes(this.pending.operation)) this.session = validateSession(result?.session);
             if (this.pending.operation === 'delete') {
@@ -893,7 +988,8 @@ export class HarnessConversation implements HarnessConversationPort {
                 if (!await this.applyCommandReceipt(receipt, this.pending.inputText ?? '')) return this.snapshot();
                 if (!this.draftAttachments.length) this.acceptDraft(this.pending);
             }
-            if (this.pending.operation === 'turn') {
+            if (this.pending.operation === 'turn' || this.pending.operation === 'steer') {
+                if (this.pending.operation === 'steer' && (result?.targetTurnId ?? result?.turnId) !== this.pending.turnId) throw new FSError('EIO', 'Mismatched native steering receipt');
                 if (typeof result?.turnId !== 'string') throw new FSError('EIO', 'Invalid turn receipt');
                 this.submittedTurnId = result.turnId;
                 this.acceptSubmission(result.turnId);
@@ -945,11 +1041,13 @@ export class HarnessConversation implements HarnessConversationPort {
 
 /** Structural port for hosts; alternate transports do not inherit the implementation. */
 export interface HarnessConversationPort {
+    refreshMetrics?(): Promise<HarnessConversationSnapshot>;
     readCommandOutput?(commandId: string, options?: import('./contracts').HarnessCommandOutputOptions): Promise<import('./contracts').HarnessCommandOutputPage>;
     loadCommandOutput?(commandId: string, options?: import('./contracts').HarnessCommandOutputLoadOptions): Promise<ArrayBuffer>;
     reconcileQuery?(operationId: string): Promise<HarnessConversationSnapshot>;
     queryCommand?(name: string, args?: string, operationId?: string, expected?: Pick<HarnessSlashCommand, 'id' | 'revision' | 'kind' | 'execution'>): Promise<HarnessConversationSnapshot>;
-    enqueue?(text: string, attachments?: HarnessAttachment[], selection?: HarnessModelSelection, submissionId?: string): Promise<HarnessConversationSnapshot>;
+    steer?(text: string, turnId: string, attachments?: HarnessAttachment[], submissionId?: string): Promise<HarnessConversationSnapshot>;
+    enqueue?(text: string, attachments?: HarnessAttachment[], selection?: HarnessModelSelection, submissionId?: string, delivery?: 'auto' | 'next-turn'): Promise<HarnessConversationSnapshot>;
     editInstructionQueue?(edit: HarnessQueueEdit): Promise<HarnessConversationSnapshot>;
     subscribe(listener: () => void): () => void;
     readonly kind: string;

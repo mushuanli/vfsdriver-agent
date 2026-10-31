@@ -9,7 +9,7 @@ export interface RemoteServerCapabilities {
     version: 1;
     serverId: string | null;
     processEpoch?: string;
-    files: { read: boolean; write: boolean; seq?: { version: 1; sqlite: boolean; transactionScope: 'file' } };
+    files: { read: boolean; write: boolean; seq?: { version: 1; sqlite: boolean; query?: boolean; nativeTransactions?: boolean; bodies?: boolean; transactionScope: 'file' } };
     sync: { push: boolean };
     process: { exec: boolean };
     terminal: { pty: boolean };
@@ -44,6 +44,7 @@ function parseCapabilities(value: unknown): RemoteServerCapabilities {
     if (v.processEpoch !== undefined && (typeof v.processEpoch !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(v.processEpoch))) throw invalid();
     if (v.files.seq !== undefined && (!v.files.seq || v.files.seq.version !== 1 || typeof v.files.seq.sqlite !== 'boolean'
         || v.files.seq.transactionScope !== 'file')) throw invalid();
+    if (v.files.seq && [v.files.seq.query, v.files.seq.nativeTransactions, v.files.seq.bodies].some(flag => flag !== undefined && typeof flag !== 'boolean')) throw invalid();
     if (v.terminal.pty && !v.process.exec) throw invalid();
     return {...structuredClone(v), authorization: validateAuthorization(v.authorization)};
 }

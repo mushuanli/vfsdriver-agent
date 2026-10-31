@@ -3,6 +3,7 @@ import { FSError, type OperationOptions } from '@itookit/vfs-core';
 import type { HarnessClient, HarnessMutationOptions, HarnessEvents, HarnessHistory, HarnessPage, HarnessReceipt, HarnessSession, HarnessHistoryOptions, HarnessEventsOptions } from './contracts';
 import { HarnessRpc } from './rpc';
 import { HarnessEventFeed } from './event-feed';
+import {validateMetrics} from './metrics';
 import { validateUsage } from './usage';
 import {validateModels, validateModelSelection} from './models';
 import {validateCommandCatalog, validateCommandResult} from './commands';
@@ -15,6 +16,14 @@ import {outputRange, validateCommandOutputRef, validateCommandOutputPage} from '
 /** Native task ownership lives on the gateway; this client never replays a mutation. */
 export class MCPHarnessClient implements HarnessClient {
     private checkpointProfiles: import('./contracts').HarnessProfile[] = [];
+    async metrics(profileId: string, sessionId: string, options?: HarnessMutationOptions) {
+        if (!this.checkpointProfiles.length) await this.profiles(options);
+        if (!this.checkpointProfiles.find(row => row.id === profileId || row.aliases?.includes(profileId))?.capabilities.metrics)
+            throw new FSError('ECAPABILITY', 'Native metrics are unavailable');
+        const value = await this.rpc.call('harness_session_metrics', {profileId, sessionId, requestId: options?.requestId ?? createRequestId()}, options) as {sessionId?: unknown; metrics?: unknown};
+        if (value?.sessionId !== sessionId) throw new FSError('EIO', 'Mismatched native metrics session');
+        return validateMetrics(value.metrics);
+    }
     async models(profileId: string, sessionId?: string, options?: OperationOptions) {
         return validateModels(await this.rpc.call('harness_models', {...this.scope, profileId, ...(sessionId ? {sessionId} : {})}, options));
     }
@@ -104,7 +113,7 @@ export class MCPHarnessClient implements HarnessClient {
         const value = validateProfiles(await this.rpc.call('harness_profiles', {}, options));
         this.epoch = value.epoch;
         if (this.scope) value.profiles=value.profiles.filter(profile => profile.projectRuntime).map(profile => ({...profile,projectCapabilities:this.scope!.capabilities,workspaces:[{id:this.scope!.projectId}]}));
-        if (this.scope?.capabilities?.sessionControl === false) value.profiles=value.profiles.map(profile => ({...profile, capabilities:{...profile.capabilities,create:false,resume:false,interrupt:false,interactions:false,fork:false,checkpointFork:false,rename:false,archive:false,unarchive:false,delete:false}}));
+        if (this.scope?.capabilities?.sessionControl === false) value.profiles=value.profiles.map(profile => ({...profile, capabilities:{...profile.capabilities,create:false,resume:false,interrupt:false,steer:false,interactions:false,fork:false,checkpointFork:false,rename:false,archive:false,unarchive:false,delete:false}}));
         this.checkpointProfiles = structuredClone(value.profiles);
         return value;
     }
@@ -113,6 +122,16 @@ export class MCPHarnessClient implements HarnessClient {
     }
     async usage(profileId: string, sessionId: string, options?: OperationOptions) {
         return validateUsage(await this.rpc.call('harness_session_usage', {...this.scope, profileId, sessionId}, options), sessionId);
+    }
+    async digest(profileId: string, sessionId: string, options?: HarnessHistoryOptions & {expectedRevision?: string; metadataOnly?: boolean}) {
+        if (!this.checkpointProfiles.length) await this.profiles(options);
+        const profile = this.checkpointProfiles.find(row => row.id === profileId || row.aliases?.includes(profileId));
+        if (!profile?.capabilities.sessionDigest) throw new FSError('ECAPABILITY', 'Session digest requires a newer server');
+        const {validateDigest} = await import('./digest');
+        return validateDigest(await this.rpc.call('harness_session_digest', {...this.scope, profileId, sessionId,
+            ...(options?.cursor ? {cursor: options.cursor} : {}),
+            ...(options?.expectedRevision ? {expectedRevision: options.expectedRevision} : {}),
+            ...(options?.metadataOnly !== undefined ? {metadataOnly: options.metadataOnly} : {})}, options), sessionId);
     }
     async read(profileId: string, sessionId: string, options?: HarnessHistoryOptions): Promise<HarnessHistory> {
         return validateHistory(await this.rpc.call('harness_session_read', { ...this.scope, profileId, sessionId, ...(options?.cursor ? {cursor:options.cursor} : {}), ...(options?.toolDetail ? {toolDetail: options.toolDetail} : {}) }, options));
@@ -172,6 +191,22 @@ export class MCPHarnessClient implements HarnessClient {
             if (typeof result?.turnId !== 'string' || !result.turnId) throw new FSError('EIO', 'Invalid harness turn');
             return { turnId: result.turnId };
         }) as { turnId: string };
+    }
+    async steer(profileId: string, sessionId: string, turnId: string, prompt: string, options?: import('./contracts').HarnessTurnOptions): Promise<{turnId: string; targetTurnId?: string}> {
+        let attachments: ReturnType<typeof validateTurnInput>;
+        try {
+            attachments = validateTurnInput(prompt, options?.attachments);
+            if (typeof turnId !== 'string' || !turnId || turnId.length > 4096) throw new FSError('EINVAL', 'Invalid steering turn identity');
+            if (!this.checkpointProfiles.length) await this.profiles(options);
+            const profile = this.checkpointProfiles.find(row => row.id === profileId || row.aliases?.includes(profileId));
+            if (!profile?.capabilities.steer) throw new FSError('ECAPABILITY', 'Native steering capability is unavailable');
+        } catch (error) {throw Object.assign(error instanceof FSError ? error : new FSError('EIO', 'Native steering discovery failed'), {outcome: 'not-committed', requestId: options?.requestId});}
+        return await this.mutate('harness_steer', {profileId, sessionId, turnId, prompt, ...(attachments.length ? {attachments} : {})}, options, value => {
+            const result = value as {turnId?: unknown; targetTurnId?: unknown};
+            if (typeof result?.turnId !== 'string' || !result.turnId || result.turnId.length > 1024 || (result.targetTurnId ?? result.turnId) !== turnId)
+                throw new FSError('EIO', 'Mismatched native steering turn');
+            return {turnId: result.turnId, ...(result.targetTurnId !== undefined ? {targetTurnId: turnId} : {})};
+        }) as {turnId: string; targetTurnId?: string};
     }
     async interrupt(profileId: string, sessionId: string, turnId: string, options?: OperationOptions) {
         await this.mutate('harness_interrupt', { profileId, sessionId, turnId }, options);

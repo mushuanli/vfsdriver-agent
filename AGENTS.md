@@ -1,6 +1,7 @@
 # @itookit/nestos-node-driver
 
 精确 turn 的已确认终态保存在原队列项 terminal 内，经既有 journal.save 持久化，重启可复用；不同 turn、未知提交与会话空闲本身不能解除队首屏障。inspect 的 lastTurnResult 必须与 lastTurnId 成对使用；空闲且队首缺终态时最多每 15 秒核对一次原生历史，无 inspect 能力也能核对。projection.reason 只解释等待条件，不改变执行准入。
+事件读取失败时，已接纳且缺终态的队首仍独立核对历史，复用 15 秒节流，不受缓存 active 阻止；保留事件故障及发送屏障，不自动重放。回归见 tests/terminal-observation.test.ts。
 
 平台无关的 nestos-node 接入层。文件与进程实现位于 src/files，同步 HTTP 协议与 harness MCP 协议归本包。不得依赖旧 vfsdriver-agent 包。
 不得依赖 app-core、UI 或宿主 API。连接配置与目录授权策略归 app-core；凭据解析与 fetch 由宿主注入。
@@ -32,7 +33,7 @@ SSE 的连接、主题与观察者故障分别处理；单个 next/error 回调�
 
 HarnessInstructionRuntime 将指令队列持久化到 HarnessRecovery，enqueue 接纳与原生 turn/command 回执分开。队列编辑带 revision，派发先保存领取，未知结果只核对原 requestId；明确拒绝后点击重新提交或继续队列才分配新的原生 attemptId。resume.retry 日志保留原 operationId、新 attemptId、阶段、结果与耗时。宿主共享控制面并保留后台观察，UI 关闭不拥有队列；snapshot 只投影排队附件名称。
 
-队列的 createdAt、dispatchedAt、acceptedAt 分别记录持久接纳、派发领取及原生接纳时间，随原恢复记录与回执投影保存；旧记录缺失时不补造，重试清除旧 attempt 的派发/接纳时间。合并保留原接纳回执，只改变仍待发送的正文和附件；运行中输入仍按队列等待，不绕过当前 turn 的执行屏障。
+队列的 createdAt、dispatchedAt、acceptedAt 分别记录持久接纳、派发领取及原生接纳时间，随原恢复记录与回执投影保存；旧记录缺失时不补造，重试清除旧 attempt 的派发/接纳时间。合并保留原接纳回执，只改变仍待发送的正文和附件；enqueue 默认 next-turn，仍等待当前 turn 的执行屏障；显式 delivery=auto 且正向协商 capabilities.steer 时，无模型选择或命令的普通输入可在当前轮内补充，不能越过暂停或前置 next-turn 项。派发先持久保存精确 steerTurnId，补充接纳不清除原轮终态屏障，回执带 kind=steer，不能用该轮第一条用户消息确认补充。原生 Claude 若在接纳前结束原轮，可返回 targetTurnId 与实际新 turnId；持久保存 steeredFrom 并按实际 turn 关联历史。未知结果只核对原 requestId，不自动重放或回退发送，既有队列与后来草稿保留。
 
 命令 execution=query 可在 active 时直接查询，跳过 resume/adopt；旧目录缺失 execution 时保守串行。队列冻结定义 id/revision，发出 expectedCommand 后由原生节点复验；查询不能覆盖队列项自己的持久回执。异步命令需确切 turn 或 command 终态才续发，恢复时同样适用；scope/loaded 明确区分受控进程与外部历史。
 
@@ -49,3 +50,11 @@ capabilities.commandOutputs 正向协商 command/operation 的 outputMode=refere
 MCP 已确认 committed 后的解码错误保留 committed，原始回执只在模块私有 WeakMap 暂存，不进入异常属性、恢复记录、日志或广播。command ID/终态封套无效时，在原 commandResults 保存固定 operationId/epoch/resultError，submission 仍为 accepted；清理传输 pending 但保留派发屏障，允许查询和继续入队，禁止 retry 生成新 attempt 重放。原ID/epoch只读核对可修复，不消费后来草稿。最近64项窗口仅淘汰已收尾的展示项，不淘汰 resultError 或 running；查询压力和重开不能解除屏障。
 
 native command 历史及事件以同 commandId 的稳定锚点合并；原生正文回显不能覆盖已固定预览/输出引用，迟到无ref或不同ref的更新不能替换原不可变产物。真实同ID终态可结束 running，但不能用其他命令或文字相同推断完成。command/turn结果ID在解码和队列恢复统一为最多1024字符。
+
+capabilities.metrics 正向协商只读指标；refreshMetrics 独立于发送、队列、提交回执和 observation.refreshError，失败仅设 metricsError。累计 token 不替代当前上下文占用；额度属于远端账号，native-estimate 与宿主估算都不是账单。严格验证原生会话身份、数值和边界，剥离未声明字段；旧节点不发送新查询。
+
+steer 的接纳回执不生成本地 steered: 用户消息；原生事件及历史是正文的来源，避免与宿主台账占位和真实回显并列重复。接纳仍按原 requestId 持久保存，不能为修复显示重发输入。
+
+已有 thread/tokenUsage/updated 事件直接更新当前会话 contextWindow，使用 last 而非累计 total，不新增指标 RPC 或轮询。缺失占用保留 null，缺失容量撤下旧容量；非法事件只记录安全分类并保留已验证值，不影响发送。并发 refreshMetrics 返回时按本地 contextRevision 保留在途收到的新上下文，仍接收独立额度/费用字段。
+
+executionRecovery 以节点实时原生状态与写锁为基准；超过60秒只展示人工恢复入口，不自动终结。recover 必须重新读历史/inspect，明确 detached 后按队列 CAS 将旧轮保存为 unknown 并暂停后续项；原运行时证据与恢复证据进入原 journal，不能伪造 terminal 或重放。无能力、未决提交/控制、占用与未知锁均拒绝。

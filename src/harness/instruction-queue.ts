@@ -12,6 +12,7 @@ import type {HarnessObservation} from './state';
 export interface HarnessInstruction {
     execution?: import('./contracts').HarnessExecutionRecovery;
     id: string; attemptId?: string; text: string; attachments: HarnessAttachment[]; selection?: HarnessModelSelection;
+    allowSteer?: boolean; steerTurnId?: string;
     commandKind?: 'prompt' | 'action';
     commandId?: string; commandRevision?: string;
     receipt?: InstructionReceipt;
@@ -26,7 +27,7 @@ export interface HarnessAbandonedInstruction {
 export interface HarnessInstructionQueue {
     recoveries?: HarnessAbandonedInstruction[];
     revision: number; paused: boolean; items: HarnessInstruction[];
-    receipts: Array<{id: string; input: string; turnId?: string; commandId?: string; createdAt?: number; dispatchedAt?: number; acceptedAt?: number}>;
+    receipts: Array<{id: string; input: string; turnId?: string; commandId?: string; kind?: 'steer'; createdAt?: number; dispatchedAt?: number; acceptedAt?: number}>;
 }
 export type HarnessQueueEdit = {expectedRevision: number} & (
     {action: 'pause' | 'resume'} | {action: 'remove' | 'retry' | 'recover'; id: string}
@@ -35,10 +36,10 @@ export type HarnessQueueProjection = Omit<HarnessInstructionQueue, 'items' | 're
     reason?: string;
     recovery?: {id: string};
     acceptedIds: string[];
-    submissions?: Array<{id: string; turnId?: string; commandId?: string; createdAt?: number; dispatchedAt?: number; acceptedAt?: number}>;
+    submissions?: Array<{id: string; turnId?: string; commandId?: string; kind?: 'steer'; createdAt?: number; dispatchedAt?: number; acceptedAt?: number}>;
     items: Array<Omit<HarnessInstruction, 'attachments'> & {files: Array<{name: string}>}>;
 };
-type InstructionReceipt = Pick<NonNullable<HarnessConversationSnapshot['submission']>, 'turnId' | 'commandId' | 'commandStatus' | 'failed' | 'resultError'>;
+type InstructionReceipt = Pick<NonNullable<HarnessConversationSnapshot['submission']>, 'turnId' | 'steeredFrom' | 'commandId' | 'commandStatus' | 'failed' | 'resultError'>;
 type SubmissionReceipt = NonNullable<HarnessConversationSnapshot['submission']>;
 type TerminalResult = NonNullable<HarnessInstruction['terminal']>['result'];
 interface Ports {
@@ -52,8 +53,8 @@ interface Ports {
 }
 const empty = (): HarnessInstructionQueue => ({revision: 0, paused: false, items: [], receipts: []});
 const fail = (message: string) => new FSError('ECONFLICT', message);
-const inputKey = (item: Pick<HarnessInstruction, 'text' | 'attachments' | 'selection' | 'commandKind'>) =>
-    sha256(new TextEncoder().encode(JSON.stringify([item.text, item.attachments, item.selection ?? null, item.commandKind ?? null])));
+const inputKey = (item: Pick<HarnessInstruction, 'text' | 'attachments' | 'selection' | 'commandKind' | 'allowSteer'>) =>
+    sha256(new TextEncoder().encode(JSON.stringify([item.text, item.attachments, item.selection ?? null, item.commandKind ?? null, ...(item.allowSteer ? [true] : [])])));
 
 /** Durable acceptance is separate from the native turn receipt. Never replay a claimed item. */
 export class HarnessInstructionRuntime {
@@ -75,7 +76,7 @@ export class HarnessInstructionRuntime {
         const reason = observation && this.reason(observation);
         return {revision: this.record.revision, paused: this.record.paused, ...(reason ? {reason} : {}), acceptedIds: this.record.receipts.map(row => row.id),
             recoveries: structuredClone(this.record.recoveries),
-            submissions: this.record.receipts.map(({id, turnId, commandId, createdAt, dispatchedAt, acceptedAt}) => ({id, turnId, commandId, createdAt, dispatchedAt, acceptedAt})),
+            submissions: this.record.receipts.map(({id, turnId, commandId, kind, createdAt, dispatchedAt, acceptedAt}) => ({id, turnId, commandId, kind, createdAt, dispatchedAt, acceptedAt})),
             items: this.record.items.map(({attachments, ...item}) => ({...structuredClone(item), files: attachments.map(({name}) => ({name}))}))};
     }
     hasReceipt(id: string): boolean {return this.record.receipts.some(row => row.id === id);}
@@ -126,7 +127,7 @@ export class HarnessInstructionRuntime {
             if (edit.action !== 'recover' || validateExecutionRecovery(evidence)?.state !== 'detached') throw fail('Invalid native recovery evidence');
             const item = this.record.items[0];
             if (edit.expectedRevision !== this.record.revision || item?.id !== edit.id || item.state !== 'dispatching'
-                || !item.receipt?.turnId || item.commandKind || item.receipt.resultError || item.terminal
+                || !item.receipt?.turnId || item.steerTurnId || item.commandKind || item.receipt.resultError || item.terminal
                 || this.ports.completion(item.receipt.turnId)) throw fail('Instruction recovery changed; refresh before recovering');
             const recovery: HarnessAbandonedInstruction = {id: item.id, attemptId: item.attemptId, turnId: item.receipt.turnId,
                 originalExecution: item.execution, recoveredAt: Date.now(), outcome: 'unknown', evidence: structuredClone(evidence)};
@@ -178,7 +179,7 @@ export class HarnessInstructionRuntime {
         if (item.state !== 'failed') throw fail('Only rejected instructions can be retried');
         validateNewInput(item);
         item.state = 'pending'; item.attemptId = requestId(); item.error = undefined; queue.paused = false;
-        item.dispatchedAt = undefined; item.acceptedAt = undefined;
+        item.dispatchedAt = undefined; item.acceptedAt = undefined; item.steerTurnId = undefined;
     }
     private reorder(queue: HarnessInstructionQueue, ids: string[]): void {
         if (!Array.isArray(ids) || new Set(ids).size !== ids.length || ids.length !== queue.items.filter(row => row.state === 'pending').length)
@@ -196,7 +197,7 @@ export class HarnessInstructionRuntime {
         const attachments = rows.flatMap(row => row.attachments);
         const text = rows.map(row => row.text).join('\n\n');
         prepareTurnInput(text, attachments);
-        rows[0].text = text; rows[0].attachments = attachments;
+        rows[0].text = text; rows[0].attachments = attachments; rows[0].allowSteer = rows.every(row => row.allowSteer === true);
         queue.items = queue.items.filter(row => row === rows[0] || !ids.includes(row.id));
     }
     private async commit(next: HarnessInstructionQueue, stage: string, id?: string): Promise<void> {
@@ -228,8 +229,39 @@ export class HarnessInstructionRuntime {
     async pump(): Promise<void> {
         if (this.pumping) return;
         this.pumping = true;
-        try {await this.advance();}
+        try {await this.advance(); await this.supplement();}
         finally {this.pumping = false;}
+    }
+    private async supplement(): Promise<void> {
+        const work = await this.serialize(() => this.prepareSupplement());
+        if (!work) return;
+        if (work.dispatch) await this.dispatch(work.item);
+        const item = this.record.items.find(row => row.id === work.item.id);
+        if (!item || item.state === 'failed' || work.dispatch && !item.receipt) return;
+        const snapshot = item.receipt ? this.ports.snapshot() : await this.ports.reconcile(item.attemptId ?? item.id);
+        await this.serialize(async () => {
+            await this.sync(); const current = this.current(work.item);
+            if (current) await this.settle(current, snapshot);
+        });
+        if (!this.record.items.some(row => row.id === work.item.id)) await this.supplement();
+    }
+    private canPassForSupplement(item: HarnessInstruction, turnId: string): boolean {
+        if (item.state !== 'dispatching' || !item.receipt?.turnId || item.receipt.resultError) return false;
+        return item.receipt.turnId === turnId || (item.terminal?.result ?? this.ports.completion(item.receipt.turnId)) === 'completed';
+    }
+    private async prepareSupplement(): Promise<{item: HarnessInstruction; dispatch: boolean} | undefined> {
+        await this.sync();
+        const existing = this.record.items.find(row => row.steerTurnId && ['dispatching', 'uncertain'].includes(row.state));
+        if (existing) return {item: structuredClone(existing), dispatch: false};
+        const state = this.ports.snapshot(), turnId = state.observation.activeTurnId;
+        if (this.record.paused || !state.canSteer || !turnId) return;
+        const index = this.record.items.findIndex(row => row.state === 'pending'), item = this.record.items[index];
+        if (!item?.allowSteer || item.commandKind || item.selection || this.record.items.slice(0, index)
+            .some(row => !this.canPassForSupplement(row, turnId))) return;
+        const dispatchedAt = Date.now();
+        await this.commit({...this.record, items: this.record.items.map(row => row === item ? {...row, state: 'dispatching', steerTurnId: turnId, dispatchedAt} : row),
+            receipts: this.record.receipts.map(row => row.id === item.id ? {...row, dispatchedAt, acceptedAt: undefined} : row)}, 'steer.claim', item.id);
+        return {item: structuredClone(this.record.items[index]), dispatch: true};
     }
     private async advance(): Promise<void> {
         const work = await this.serialize(() => this.prepare());
@@ -253,7 +285,7 @@ export class HarnessInstructionRuntime {
         return {item: structuredClone(this.record.items[0]), dispatch: true};
     }
     private current(expected: HarnessInstruction): HarnessInstruction | undefined {
-        const current = this.record.items[0];
+        const current = this.record.items.find(row => row.id === expected.id);
         return current?.id === expected.id && current.attemptId === expected.attemptId
             && ['dispatching', 'uncertain'].includes(current.state) ? current : undefined;
     }
@@ -298,9 +330,10 @@ export class HarnessInstructionRuntime {
     }
     private async rememberReceipt(item: HarnessInstruction, source: InstructionReceipt): Promise<void> {
         const {turnId,commandId} = source, receipt = receiptData(source);
+        if (item.steerTurnId && (source.steeredFrom ?? turnId) !== item.steerTurnId) throw fail('Native steering receipt has a different target turn');
         const acceptedAt = item.acceptedAt ?? Date.now();
         await this.commit({...this.record,
-            receipts: this.record.receipts.map(row => row.id === item.id ? {...row, turnId, commandId, acceptedAt} : row),
+            receipts: this.record.receipts.map(row => row.id === item.id ? {...row, turnId, commandId, ...(item.steerTurnId ? {kind: 'steer' as const} : {}), acceptedAt} : row),
             items: this.record.items.map(row => row.id === item.id ? {...row,receipt, acceptedAt, execution: row.execution ?? this.ports.snapshot().executionRecovery} : row)}, 'admitted',item.id);
     }
     private async markUnknown(item: HarnessInstruction): Promise<void> {
@@ -313,6 +346,9 @@ export class HarnessInstructionRuntime {
             items: this.record.items.map(row => row.id === item.id ? {...row, state: 'failed', error: code} : row)}, 'rejected', item.id);
     }
     private async complete(item: HarnessInstruction, snapshot: HarnessConversationSnapshot, receipt: SubmissionReceipt): Promise<void> {
+        if (item.steerTurnId) {
+            await this.commit({...this.record, items: this.record.items.filter(row => row.id !== item.id)}, 'steer.accepted', item.id); return;
+        }
         const command = receipt.commandId ? this.ports.command(receipt.commandId) : undefined;
         const turnId = receipt.turnId ?? command?.turnId;
         const completion = this.terminalResult(item, turnId);
@@ -350,8 +386,8 @@ function failedReceipt(completion: string | undefined, command: {failed?: boolea
     return completion === 'failed' || completion === 'cancelled' || !!command?.failed || !!receipt.failed;
 }
 function receiptData(source: InstructionReceipt): InstructionReceipt {
-    const {turnId,commandId,commandStatus,failed,resultError} = source;
-    return {turnId,commandId,commandStatus,failed,...(resultError ? {resultError: {...resultError}} : {})};
+    const {turnId,steeredFrom,commandId,commandStatus,failed,resultError} = source;
+    return {turnId,steeredFrom,commandId,commandStatus,failed,...(resultError ? {resultError: {...resultError}} : {})};
 }
 function validId(id: string): boolean {return typeof id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(id);}
 
@@ -390,6 +426,7 @@ function validateNewInput(item: HarnessInstruction): void {
     } catch (error) {throw Object.assign(error as Error, {outcome: 'not-committed'});}
 }
 function validateInstructionOptions(item: HarnessInstruction): void {
+    if (item.allowSteer !== undefined && typeof item.allowSteer !== 'boolean' || !validOptionalReference(item.steerTurnId, COMMAND_ID_LIMIT)) throw new FSError('EINVAL', 'Invalid native steering delivery');
     if (item.terminal !== undefined && (!item.terminal || typeof item.terminal.turnId !== 'string' || !item.terminal.turnId || item.terminal.turnId.length > 1024 || item.terminal.turnId !== item.receipt?.turnId
         || !['completed', 'failed', 'cancelled'].includes(item.terminal.result) || !Number.isFinite(item.terminal.observedAt) || item.terminal.observedAt <= 0))
         throw new FSError('EINVAL', 'Invalid instruction terminal evidence');
@@ -402,7 +439,7 @@ function validateInstructionOptions(item: HarnessInstruction): void {
 }
 function validateInstructionReceipt(receipt: InstructionReceipt): void {
     if (!receipt || typeof receipt !== 'object') throw new FSError('EINVAL', 'Invalid native instruction receipt');
-    for (const id of [receipt.turnId, receipt.commandId])
+    for (const id of [receipt.turnId, receipt.commandId, receipt.steeredFrom])
         if (!validOptionalReference(id, COMMAND_ID_LIMIT)) throw new FSError('EINVAL', 'Invalid native instruction receipt identity');
     if (!validReceiptStatus(receipt) || !validResultError(receipt.resultError)) throw new FSError('EINVAL', 'Invalid native instruction receipt status');
 }

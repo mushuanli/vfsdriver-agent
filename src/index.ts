@@ -12,7 +12,7 @@ export type { RemoteAuthorization, RemoteProjectCapabilities } from './authoriza
 export { validateAuthorization } from './authorization';
 export type { NestOSNodeDriver, NestOSNodeDescriptor } from './provider';
 export * from './files/index';
-export type { HarnessClient, HarnessMutationOptions, HarnessProfile, HarnessSession, HarnessPage, HarnessHistory, HarnessHistoryOptions, HarnessEvent, HarnessEvents, HarnessReceipt } from './harness/contracts';
+export type { HarnessClient, HarnessMutationOptions, HarnessExecutionRecovery, HarnessProfile, HarnessSession, HarnessPage, HarnessHistory, HarnessHistoryOptions, HarnessEvent, HarnessEvents, HarnessReceipt } from './harness/contracts';
 
 export type { ProjectClient, RemoteProject, ProjectMount, RegisterProject, ProjectProcess } from './projects';
 
@@ -39,7 +39,7 @@ export type { HarnessSlashCommand, HarnessCommandResult, HarnessCommandRecord, H
 
 export type {HarnessModel, HarnessModelCatalog, HarnessModelSelection, HarnessCommandOptions} from './harness/contracts';
 
-export type {HarnessInstruction, HarnessInstructionQueue, HarnessQueueEdit, HarnessQueueProjection} from './harness/instruction-queue';
+export type {HarnessAbandonedInstruction, HarnessInstruction, HarnessInstructionQueue, HarnessQueueEdit, HarnessQueueProjection} from './harness/instruction-queue';
 
 export type {HarnessInterruptRequest, HarnessControlRecord, HarnessControlProjection} from './harness/control-ledger';
 
@@ -50,3 +50,5 @@ export type {HarnessCommandOutputRef, HarnessCommandOutputPage, HarnessCommandOu
 /** @deprecated Use the NestOS names; legacy factories keep working. */
 export {createNestOSNodeDriver as createMindOSNodeDriver, createNestOSNodeDriver as createMindOSNodeClient} from "./provider";
 export type {NestOSNodeDriver as MindOSNodeDriver, NestOSNodeDriver as MindOSNodeClient, NestOSNodeDescriptor as MindOSNodeDescriptor} from "./provider";
+
+export type {HarnessMetrics} from './harness/metrics';

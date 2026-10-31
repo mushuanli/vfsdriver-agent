@@ -95,6 +95,8 @@ itookit 内自动发现 `tools/nestos-node`。文件进程隔离测试还需 `NE
 
 原生历史可携带 `eventCursor: {after, eventEpoch}`，表示快照已包含的事件边界。HarnessConversation 从该边界读取后续增量，事件缺口修复后不倒退游标；旧服务未提供该字段时沿用原有兼容路径。执行中的 Codex 快照由服务端读取原生运行状态，避免只读取尚未写入完整回答的历史文件。
 
+已接纳队首缺少精确 turn 终态时，即使事件读取失败，也会独立尝试原生历史核对（最多每 15 秒一次）；不以缓存的 active 状态阻止重启后的核对。核对成功仍保留事件故障提示并阻止新派发，仅持久结算原 turn 的已确认终态；无终态、其他 turn 或读取失败均保留队列，不重放输入。`turn.history.reconcile` 的 `events_fallback` 阶段记录 confirmed/unconfirmed/failure、安全错误码及耗时。
+
 多关键字查询以空格/制表符分隔，按不区分大小写、顺序不限的字面 AND 匹配；文件内容以命中行为单位，原生会话内容以消息为单位。文件 discovery metadata 与原生 profile 分别用 `searchKeywords: true` 声明该语义；driver 在含分词空白的查询发送前核对能力，避免旧节点静默按整段短语搜索。显式换行保留原有字面多行语义。
 
 `adapter.observeHarness(projects.harness(project, {readOnly: true}), false)` 创建共享 `HarnessStatusObserver`，subscribe 接收更新通知，refresh 返回 profile/session 的 `HarnessObservation`；仅使用有界列表和事件，不读取每行历史、不 resume。execution、最近结果、连接、时效和控制能力分别返回。`close()` 释放底层客户端，关闭界面不停止原生 turn。
@@ -178,7 +180,7 @@ A matching `committed` receipt remains committed even when its result cannot be 
 
 `HarnessConversation.interrupt({sessionId, turnId, operationId})` freezes an exact native target and writes an independent control receipt before dispatch. `reconcileControl(operationId)` queries that original operation and epoch without replaying cancellation. `snapshot().controls` separates `receipt` (`unknown`, `accepted`, `rejected`) from the observed `effect` (`unconfirmed`, `completed`, `failed`, `cancelled`). Acknowledgement does not prove termination. Recovery uses the existing journal, preserves input drafts and pending sends, and retains exact terminal observations across reopening.
 
-A suspended send reply does not block queue edits or native cancellation. Cancellation itself does not pause the queue; hosts can persist an explicit queue pause before requesting cancellation. Unknown controls and acknowledged controls without terminal evidence prevent conflicting dispatch. Hosts must pass the explicit operation identity when reconciling UI operations and must keep native capability and ownership checks. Pause and steering are separate capabilities.
+A suspended send reply does not block queue edits or native cancellation. Cancellation itself does not pause the queue; hosts can persist an explicit queue pause before requesting cancellation. Unknown controls and acknowledged controls without terminal evidence prevent conflicting dispatch. Hosts must pass the explicit operation identity when reconciling UI operations and must keep native capability and ownership checks. Pause and steering are separate capabilities. With positively negotiated `capabilities.steer`, `conversation.steer(text, turnId, attachments, submissionId)` appends context to the exact owned active turn. Its stable request ID, target and draft revision use the existing recovery journal; unknown results are reconciled without replay. Steering preserves queued instructions and later composer edits. Renaming native metadata does not require an empty instruction queue.
 
 ### Recovering completion from native history
 
@@ -215,6 +217,15 @@ revision and input matching rules. Queue admission and the host OperationLedger 
 the authority for consuming the submitted editor draft.
 
 文件 HTTP 错误保留标准 VFS `code`，并以 `remoteCode` 传递经过格式校验的服务端原因（如 `METADATA_IO`）。只有状态码或服务端错误码时，默认提示包含二者，便于区分网络连接失败与已送达的服务端异常。
+
+Native metrics are separate from transcript totals and host pricing. Positively negotiated `capabilities.metrics` enables `conversation.refreshMetrics()` / `client.metrics(profileId, sessionId)`. The read-only query validates session identity, bounds and numeric values and strips unknown fields. Observations include context capacity/last occupancy, native quota windows/reset times/credit units and optional native cost estimates. Missing values stay unknown. Metrics queries do not consume drafts, acquire the submission slot or change the execution observation on failure; `metricsError` is local to the metrics display.
+
+`enqueue(text, attachments, selection, submissionId, delivery)` defaults to `next-turn`. Explicit `auto` delivery permits plain queued input to supplement the owned active turn when steering is negotiated; model changes, commands, pauses and preceding next-turn items retain their barriers. A steering receipt confirms admission, not turn completion. Claude may acknowledge the input in a new native turn if the targeted turn has already ended; `targetTurnId` preserves the requested target and `turnId` identifies the actual turn. Unknown receipts are reconciled without replay.
+
+### 精简会话分析接口
+
+正向协商 `profile.capabilities.sessionDigest` 后可调用 `digest(profileId, sessionId, {cursor?, expectedRevision?, metadataOnly?})`。
+该接口不调用模型，只返回来源明确的用户提示词和可见助手正文，排除自动上下文、推理和工具。`omittedUnclassified` 大于零表示存在无法确定来源的用户记录，分析调用方不得把它当作完整输入。`metadataOnly` 不读取历史；分页绑定 `revision`，源变化明确报错。旧节点不回退全量历史。此接口继承项目 ID/revision 与读取授权，不恢复或启动原生执行。
 
 ### 执行结果未知时的人工恢复
 

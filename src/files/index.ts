@@ -15,4 +15,4 @@ export type { ExecOptions, RemoteProcessSpec } from './process';
 export { HttpTransport } from './transport';
 
 export { HttpSeqClient } from './seq/client';
-export type { HttpSeqChange, HttpSeqSnapshot } from './seq/client';
+export type { HttpSeqChange, HttpSeqSnapshot, HttpSeqSelection, HttpSeqPage } from './seq/client';

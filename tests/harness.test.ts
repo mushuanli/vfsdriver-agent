@@ -201,7 +201,7 @@ it.each(['missing', 'throws'])('uses the internal mutation ID generator when nat
 });
 it('validates native catalogs and carries project scope plus stable command receipts', async () => {
     const commands = [{name: 'team:verify', description: 'Verify', argumentHint: '[path]', kind: 'prompt'}];
-    const call = vi.fn(async (name: string, args: any) => name === 'harness_commands' ? {commands}
+    const call = vi.fn(async (name: string, args: Record<string, unknown>) => name === 'harness_commands' ? {commands}
         : name === 'harness_profiles' ? {epoch: 'e', profiles: []}
         : {requestId: args.requestId, outcome: 'committed', result: {commandId: 'native', output: 'Done'}});
     const client = new MCPHarnessClient({call, close: vi.fn()}, {projectId: 'p', revision: 3});
@@ -212,4 +212,22 @@ it('validates native catalogs and carries project scope plus stable command rece
         epoch: 'e', requestId: 'once', command: 'team:verify', arguments: 'src'}, {requestId: 'once'});
     for (const rows of [[...commands, ...commands], [{...commands[0], name: 'wrong name'}], [{...commands[0], kind: 'shell'}]])
         expect(() => validateCommands({commands: rows})).toThrow();
+});
+
+it('negotiates steering and validates its exact receipt without sending to legacy nodes', async () => {
+    const profiles = [{id: 'codex', kind: 'codex', workspaces: [{id: 'p'}], capabilities: {history: true, create: true, resume: true, interrupt: true, interactions: true, steer: true}}];
+    const call = vi.fn(async (name: string, args: Record<string, unknown>) => name === 'harness_profiles' ? {epoch: 'e', profiles}
+        : {requestId: args.requestId, outcome: 'committed', result: {turnId: args.turnId}});
+    const client = new MCPHarnessClient({call, close: vi.fn()});
+    expect(await client.steer('codex', 's', 'active', 'Context', {requestId: 'context'})).toEqual({turnId: 'active'});
+    expect(call).toHaveBeenLastCalledWith('harness_steer', expect.objectContaining({sessionId: 's', turnId: 'active', requestId: 'context'}), expect.anything());
+    const legacyCall = vi.fn(async () => ({epoch: 'e', profiles: []}));
+    const legacy = new MCPHarnessClient({call: legacyCall, close: vi.fn()});
+    await expect(legacy.steer('codex', 's', 'active', 'Context', {requestId: 'legacy'})).rejects.toMatchObject({code: 'ECAPABILITY', outcome: 'not-committed'});
+    expect(legacyCall).toHaveBeenCalledOnce();
+    await expect(client.steer('codex', 's', 'active', '中'.repeat(50000), {requestId: 'large'})).rejects.toMatchObject({outcome: 'not-committed'});
+    call.mockImplementation(async (_name, args) => ({requestId: args.requestId, outcome: 'committed', result: {turnId: 'native-next', targetTurnId: 'active'}}));
+    expect(await client.steer('codex', 's', 'active', 'Context', {requestId: 'next'})).toEqual({turnId: 'native-next', targetTurnId: 'active'});
+    call.mockImplementation(async (_name, args) => ({requestId: args.requestId, outcome: 'committed', result: {turnId: 'wrong'}}));
+    await expect(client.steer('codex', 's', 'active', 'Context', {requestId: 'mismatch'})).rejects.toMatchObject({outcome: 'committed'});
 });

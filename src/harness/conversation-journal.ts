@@ -5,7 +5,7 @@ export interface HarnessRecovery {
     lastFork?: import('./forks').HarnessForkReceipt;
     instructionQueue?: import('./instruction-queue').HarnessInstructionQueue;
     responses?: Array<{id: string | number; requestId: string; epoch: string}>;
-    submission?: {id: string; status: 'pending' | 'accepted' | 'rejected'; turnId?: string; code?: string; commandId?: string; commandStatus?: 'running' | 'completed'; failed?: boolean; resultError?: {code: string}};
+    submission?: {id: string; kind?: 'steer'; steeredFrom?: string; status: 'pending' | 'accepted' | 'rejected'; turnId?: string; code?: string; commandId?: string; commandStatus?: 'running' | 'completed'; failed?: boolean; resultError?: {code: string}};
     submittedTurnId?: string;
     deletedSessionIds?: string[];
     draft?: string;
@@ -13,7 +13,7 @@ export interface HarnessRecovery {
     draftRevision?: number;
     commandResults?: HarnessCommandRecord[];
     sessionId?: string;
-    pending?: {requestId: string; epoch: string; operation: string; inputText?: string; draftRevision?: number;
+    pending?: {requestId: string; epoch: string; operation: string; turnId?: string; inputText?: string; draftRevision?: number;
         /** Queued execution has no ownership of the current composer draft. */
         consumeDraft?: false;
         forkCheckpoint?: import('./forks').ForkCheckpoint};
@@ -28,6 +28,8 @@ export function validateSubmission(value: unknown): HarnessRecovery['submission'
     const receipt = value as NonNullable<HarnessRecovery['submission']>;
     if (!receipt || typeof receipt.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(receipt.id)
         || !['pending', 'accepted', 'rejected'].includes(receipt.status)
+        || receipt.kind !== undefined && receipt.kind !== 'steer'
+        || receipt.steeredFrom !== undefined && (typeof receipt.steeredFrom !== 'string' || !receipt.steeredFrom || receipt.steeredFrom.length > 1024)
         || receipt.turnId !== undefined && (typeof receipt.turnId !== 'string' || !receipt.turnId)
         || receipt.commandId !== undefined && (typeof receipt.commandId !== 'string' || !receipt.commandId)
         || receipt.commandStatus !== undefined && !['running', 'completed'].includes(receipt.commandStatus)

@@ -41,3 +41,30 @@ it('rejects malformed SeqFile snapshots and committed revision results', async (
         await expect(client.transaction('info.seq', null, [])).rejects.toMatchObject({ code: 'EIO' });
     } finally { client.dispose(); }
 });
+
+it('queries only explicit keys and binds prefix pages to a revision', async () => {
+    const bodies: unknown[] = [];
+    const client = new HttpSeqClient({endpoint: 'http://localhost/', alias: 'docs', credential: () => 'secret',
+        fetch: async (_url, init) => {
+            const body = JSON.parse(String(init?.body)); bodies.push(body);
+            return Response.json({revision: 'r1', next: body.selection.keys ? null : 'event/01', entries: [{key: body.selection.keys?.[0] ?? 'event/01', value: 'safe'}]});
+        }});
+    try {
+        expect((await client.query('info.seq', {keys: ['board/one']})).entries).toEqual([{key:'board/one',value:'safe'}]);
+        await client.query('info.seq', {prefix:'event/',limit:1,expectedRevision:'r1'});
+        expect(bodies).toEqual([{path:'info.seq',selection:{keys:['board/one']}},{path:'info.seq',selection:{prefix:'event/',limit:1,expectedRevision:'r1'}}]);
+        await expect(client.query('info.seq', {limit:1001})).rejects.toMatchObject({code:'EINVAL'});
+    } finally {client.dispose();}
+});
+
+it('rejects unrelated keys, duplicate rows, invalid cursors and changed page revisions', async () => {
+    const replies = [
+        {revision:'r1',next:null,entries:[{key:'private',value:'secret'}]},
+        {revision:'r1',next:null,entries:[{key:'board/one',value:1},{key:'board/one',value:2}]},
+        {revision:'r1',next:'elsewhere',entries:[{key:'board/one',value:1}]},
+        {revision:'r2',next:null,entries:[]},
+    ];
+    const client = new HttpSeqClient({endpoint:'http://localhost/',alias:'docs',credential:()=> 'secret',fetch:async()=>Response.json(replies.shift())});
+    try {for (let i=0;i<4;i++) await expect(client.query('info.seq',{keys:['board/one'],expectedRevision:'r1'})).rejects.toMatchObject({code:'EIO'});}
+    finally {client.dispose();}
+});

@@ -5,7 +5,7 @@ export interface HarnessProfile {
     aliases?: string[];
     projectCapabilities?: import('../authorization').RemoteProjectCapabilities;
     id: string; kind: string; projectRuntime?: boolean; workspaces: Array<{ id: string }>;
-    capabilities: { executionRecovery?: boolean; models?: boolean; slashCommands?: boolean; commandQueries?: boolean; commandOutputs?: boolean; usage?: boolean; history: boolean; create: boolean; resume: boolean; interrupt: boolean; interactions: boolean; fork?: boolean; checkpointFork?: boolean; search?: boolean; searchPrompts?: boolean; searchKeywords?: boolean; rename?: boolean; archive?: boolean; unarchive?: boolean; delete?: boolean; attachments?: Array<'text' | 'image'> };
+    capabilities: { executionRecovery?: boolean; sessionDigest?: boolean; metrics?: boolean; models?: boolean; slashCommands?: boolean; commandQueries?: boolean; commandOutputs?: boolean; usage?: boolean; history: boolean; create: boolean; resume: boolean; interrupt: boolean; steer?: boolean; interactions: boolean; fork?: boolean; checkpointFork?: boolean; search?: boolean; searchPrompts?: boolean; searchKeywords?: boolean; rename?: boolean; archive?: boolean; unarchive?: boolean; delete?: boolean; attachments?: Array<'text' | 'image'> };
 }
 export interface HarnessWriterLock {
     status: 'held' | 'not-held' | 'unknown'; checkedAt: number; acquiredAt?: number | null;
@@ -17,8 +17,10 @@ export interface HarnessExecutionRecovery {
     runtimeId: string; processId: number; childPid: number; runtimeStartedAt: number;
 }
 export interface HarnessSession {
+    /** Opaque persisted-history revision, independent of this runtime's event cursor. */
     historyRevision?: string;
     executionRecovery?: HarnessExecutionRecovery;
+    metrics?: import('./metrics').HarnessMetrics;
     writerLock?: HarnessWriterLock;
     usage?: HarnessUsage; usageUnavailable?: boolean;
     id: string; title: string; cwd: string | null; status: string | null; updatedAt: number | null; resumable: boolean;
@@ -80,6 +82,8 @@ export interface HarnessModelSelection {modelId: string; reasoningEffort?: strin
 export interface HarnessModel {id: string; label: string; reasoningEfforts: Array<{id: string; label: string}>; defaultReasoningEffort?: string}
 export interface HarnessModelCatalog {models: HarnessModel[]; current?: HarnessModelSelection; default?: HarnessModelSelection}
 export interface HarnessClient {
+    digest?(profileId: string, sessionId: string, options?: HarnessHistoryOptions & {expectedRevision?: string; metadataOnly?: boolean}): Promise<import('./digest').HarnessSessionDigest>;
+    metrics?(profileId: string, sessionId: string, options?: HarnessMutationOptions): Promise<import('./metrics').HarnessMetrics>;
     readCommandOutput?(profileId: string, ref: HarnessCommandOutputRef, options?: HarnessCommandOutputOptions): Promise<HarnessCommandOutputPage>;
     queryCommand?(profileId: string, sessionId: string, command: string, args: string, options?: HarnessQueryOptions): Promise<HarnessCommandResult>;
     commandCatalog?(profileId: string, sessionId?: string, options?: OperationOptions): Promise<HarnessCommandCatalog>;
@@ -101,6 +105,7 @@ export interface HarnessClient {
     create(profileId: string, workspaceId: string, options?: HarnessMutationOptions): Promise<{ session: HarnessSession }>;
     resume(profileId: string, sessionId: string, options?: HarnessMutationOptions): Promise<{ session: HarnessSession }>;
     turn(profileId: string, sessionId: string, prompt: string, options?: HarnessTurnOptions): Promise<{ turnId: string }>;
+    steer?(profileId: string, sessionId: string, turnId: string, prompt: string, options?: HarnessTurnOptions): Promise<{turnId: string; targetTurnId?: string}>;
     interrupt(profileId: string, sessionId: string, turnId: string, options?: HarnessMutationOptions): Promise<void>;
     respond(profileId: string, nativeRequestId: string | number, response: Record<string, unknown>, options?: HarnessMutationOptions): Promise<void>;
     subscribe(profileId: string, listener: () => void): () => void;

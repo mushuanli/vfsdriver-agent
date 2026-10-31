@@ -1,6 +1,6 @@
 export type {HarnessTurnSubmissionEvidence} from './contracts';
 export type {HarnessWriterLock} from './contracts';
-export type { HarnessClient, HarnessMutationOptions, HarnessProfile, HarnessSession, HarnessPage, HarnessHistory, HarnessHistoryOptions, HarnessEventsOptions, HarnessEvent, HarnessEvents, HarnessReceipt } from './contracts';
+export type { HarnessClient, HarnessMutationOptions, HarnessExecutionRecovery, HarnessProfile, HarnessSession, HarnessPage, HarnessHistory, HarnessHistoryOptions, HarnessEventsOptions, HarnessEvent, HarnessEvents, HarnessReceipt } from './contracts';
 export type {HarnessInterruptRequest, HarnessControlRecord, HarnessControlProjection} from './control-ledger';
 export {validateControls} from './control-ledger';
 export { HarnessConversation } from './conversation';
@@ -21,7 +21,7 @@ export type { HarnessSlashCommand, HarnessCommandResult, HarnessCommandRecord, H
 
 export type {HarnessModel, HarnessModelCatalog, HarnessModelSelection, HarnessCommandOptions} from './contracts';
 
-export type {HarnessInstruction, HarnessInstructionQueue, HarnessQueueEdit, HarnessQueueProjection} from './instruction-queue';
+export type {HarnessAbandonedInstruction, HarnessInstruction, HarnessInstructionQueue, HarnessQueueEdit, HarnessQueueProjection} from './instruction-queue';
 
 export type {HarnessCommandCatalog, HarnessCommandObservation} from './contracts';
 export type {HarnessCommandOutputRef, HarnessCommandOutputPage, HarnessCommandOutputOptions, HarnessCommandOutputLoadOptions,
@@ -29,3 +29,7 @@ export type {HarnessCommandOutputRef, HarnessCommandOutputPage, HarnessCommandOu
 
 export {validateAttachments as validateHarnessAttachments} from './attachments';
 export {validateTurnInput as validateHarnessTurnInput} from './attachments';
+
+export type {HarnessMetrics} from './metrics';
+
+export type {HarnessDigestMessage, HarnessSessionDigest} from './digest';

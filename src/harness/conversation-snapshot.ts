@@ -8,6 +8,8 @@ import type {HarnessUsage} from './usage';
 export interface HarnessConversationActions {
     canQueryCommand?: boolean;
     canCommand?: boolean;
+    supportsSteer?: boolean;
+    canSteer?: boolean;
     canSend: boolean;
     canInterrupt: boolean;
     canRespond: boolean;
@@ -20,6 +22,9 @@ export interface HarnessConversationActions {
 /** Public read model; runtime fields and private implementation never define this contract. */
 export interface HarnessConversationSnapshot extends HarnessConversationActions {
     executionRecovery?: import('./contracts').HarnessExecutionRecovery;
+    metrics?: import('./metrics').HarnessMetrics;
+    metricsError?: {code: string};
+    supportsMetrics?: boolean;
     writerLock?: import('./contracts').HarnessWriterLock;
     resultError?: {operationId: string; code: string};
     queryReceipts?: Array<{id: string; status: 'accepted'}>;

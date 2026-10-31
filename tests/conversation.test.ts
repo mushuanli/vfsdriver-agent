@@ -800,7 +800,7 @@ it('persists unknown native management outcomes and prevents mutation replay aft
     const first = new HarnessConversation(client, managed, 'p', 's', true, journal); await first.read();
     await expect(first.rename('Saved elsewhere')).rejects.toMatchObject({outcome: 'unknown'}); await first.close();
     const next = new HarnessConversation(client, managed, 'p', 's', true, journal); await next.read();
-    await expect(next.rename('Saved elsewhere')).rejects.toMatchObject({code: 'EACCES'});
+    await expect(next.rename('Saved elsewhere')).rejects.toMatchObject({code: 'EBUSY'});
     expect(client.rename).toHaveBeenCalledOnce();
     vi.mocked(client.operation).mockResolvedValue({requestId: record!.pending!.requestId, outcome: 'committed', result: {session: {...session, title: 'Saved elsewhere'}}});
     vi.mocked(client.read).mockResolvedValue({session: {...session, title: 'Saved elsewhere'}, turns: []});
@@ -1133,4 +1133,151 @@ it('allows enqueue and queue pause while its claimed native submission reply han
     finish({turnId: 'original'}); await pumping;
     expect(saved?.instructionQueue).toMatchObject({paused: true, items: [{id: 'first-unlocked', receipt: {turnId: 'original'}}, {id: 'second-unlocked', text: 'Revised second'}]});
     expect(client.turn).toHaveBeenCalledOnce(); await view.close();
+});
+
+const steeringProfile = {...profile, capabilities: {...profile.capabilities, steer: true, rename: true}};
+function steeringFixture() {
+    const client = peer(); let record: HarnessRecovery | undefined;
+    const journal = {epoch: 'e', load: async () => record, save: async (next: HarnessRecovery) => {record = structuredClone(next);}};
+    vi.mocked(client.read).mockResolvedValue({session: {...session, status: 'active', activeTurnId: 'active'}, turns: []});
+    client.steer = vi.fn(async () => ({turnId: 'active'}));
+    client.rename = vi.fn(async (_p, _s, title) => ({session: {...session, title}}));
+    const open = () => new HarnessConversation(client, steeringProfile, 'p', 's', true, journal);
+    return {client, journal, open, record: () => record};
+}
+it('renames an active conversation with queued instructions and preserves its active state and queue', async () => {
+    const f = steeringFixture(), view = f.open(); await view.read();
+    await view.enqueue('Next task', [], undefined, 'queued');
+    expect(view.snapshot().canRename).toBe(true);
+    const state = await view.rename('工具箱改进');
+    expect(state).toMatchObject({title: '工具箱改进', active: true, observation: {activeTurnId: 'active'}, instructionQueue: {items: [{id: 'queued'}]}});
+    expect(f.client.resume).not.toHaveBeenCalled(); expect(f.client.turn).not.toHaveBeenCalled(); await view.close();
+});
+it('steers the exact active turn with a stable receipt while preserving queued work and newer drafts', async () => {
+    const f = steeringFixture(), view = f.open(); await view.read(); await view.enqueue('Next', [], undefined, 'queued');
+    let finish!: (value: {turnId: string}) => void;
+    f.client.steer = vi.fn(() => new Promise(resolve => {finish = resolve;}));
+    const sending = view.steer('Added context', 'active', [], 'context');
+    await vi.waitFor(() => expect(f.client.steer).toHaveBeenCalledOnce());
+    await view.saveDraft('Newer draft'); finish({turnId: 'active'});
+    expect(await sending).toMatchObject({active: true, draft: 'Newer draft', submission: {id: 'context', kind: 'steer', status: 'accepted', turnId: 'active'}, instructionQueue: {items: [{id: 'queued'}]}});
+    expect(f.client.steer).toHaveBeenCalledWith('codex', 's', 'active', 'Added context', expect.objectContaining({epoch: 'e', requestId: 'context'}));
+    expect(f.client.turn).not.toHaveBeenCalled(); await view.close();
+});
+it('recovers an unknown steering receipt after reopening without replaying the input or consuming a later draft', async () => {
+    const f = steeringFixture(), view = f.open(); await view.read();
+    f.client.steer = vi.fn(async () => {throw {outcome: 'unknown'};});
+    await expect(view.steer('Added context', 'active', [], 'context')).rejects.toMatchObject({outcome: 'unknown'});
+    await view.saveDraft('Keep me'); await view.close();
+    const next = f.open(); await next.read(); expect(next.snapshot().canSteer).toBe(false);
+    vi.mocked(f.client.operation).mockResolvedValue({requestId: 'context', outcome: 'committed', result: {turnId: 'active'}});
+    expect(await next.reconcile('context')).toMatchObject({draft: 'Keep me', pending: false, submission: {id: 'context', status: 'accepted', kind: 'steer'}});
+    expect(f.client.steer).toHaveBeenCalledOnce(); await next.close();
+});
+it('rejects stale steering targets, unsupported profiles and invalid native titles before sending', async () => {
+    const f = steeringFixture(), view = f.open(); await view.read();
+    await expect(view.steer('Context', 'different', [], 'stale')).rejects.toMatchObject({code: 'ECONFLICT', outcome: 'not-committed'});
+    await expect(view.rename('a'.repeat(513))).rejects.toMatchObject({code: 'EINVAL'});
+    const legacy = new HarnessConversation(f.client, profile, 'p', 's', true, f.journal); await legacy.read();
+    expect(legacy.snapshot().canSteer).toBe(false);
+    await expect(legacy.steer('Context', 'active', [], 'legacy')).rejects.toMatchObject({outcome: 'not-committed'});
+    expect(f.client.steer).not.toHaveBeenCalled(); expect(f.client.rename).not.toHaveBeenCalled(); await view.close(); await legacy.close();
+});
+
+it('reports the failing refresh stage when renaming and logs no native title or context bodies', async () => {
+    const f = steeringFixture(), view = f.open();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {}), warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+        await view.read(); await view.steer('private context body', 'active', [], 'safe-log');
+        expect(info.mock.calls).toContainEqual(['[Harness] Native mutation', expect.objectContaining({operation: 'harness.steer', operationId: 'safe-log', result: 'accepted', stage: 'persist-receipt'})]);
+        vi.mocked(f.client.eventSnapshot).mockRejectedValue(Object.assign(new Error('private transport response'), {code: 'EACCES'}));
+        await view.read();
+        await expect(view.rename('private native title')).rejects.toThrow('events: EACCES');
+        expect(f.client.rename).not.toHaveBeenCalled();
+        const logs = JSON.stringify([...info.mock.calls, ...warn.mock.calls]);
+        expect(logs).not.toMatch(/private context body|private native title|private transport response/);
+        expect(warn.mock.calls).toContainEqual(['[Harness] Native mutation rejected', expect.objectContaining({operation: 'harness.rename', stage: 'validation', code: 'EIO'})]);
+    } finally {info.mockRestore(); warn.mockRestore(); await view.close();}
+});
+it('keeps rejected steering separate from the queued next turn without automatically retrying either input', async () => {
+    const f = steeringFixture(), view = f.open(); await view.read(); await view.enqueue('Next queued input', [], undefined, 'queued');
+    f.client.steer = vi.fn(async () => {throw {outcome: 'not-committed', code: 'ECONFLICT'};});
+    await expect(view.steer('Rejected context', 'active', [], 'rejected')).rejects.toMatchObject({outcome: 'not-committed'});
+    expect(view.snapshot()).toMatchObject({draft: 'Rejected context', pending: false, submission: {id: 'rejected', status: 'rejected', kind: 'steer'}, instructionQueue: {items: [{id: 'queued'}]}});
+    await view.refresh(); expect(f.client.steer).toHaveBeenCalledOnce(); expect(f.client.turn).not.toHaveBeenCalled(); await view.close();
+});
+
+async function queuedSteeringFixture() {
+    const f = steeringFixture();
+    await f.journal.save({sessionId: 's', instructionQueue: {revision: 1, paused: false, receipts: [{id: 'original', input: 'a'.repeat(64), turnId: 'active'}],
+        items: [{id: 'original', text: 'Original task', attachments: [], createdAt: 1, state: 'dispatching', receipt: {turnId: 'active'}}]}});
+    const view = f.open(); await view.read(); return {...f, view};
+}
+it('delivers eligible queued context into the active turn and retains its original terminal barrier and newer draft', async () => {
+    const f = await queuedSteeringFixture();
+    await f.view.enqueue('Additional direction', [], undefined, 'supplement', 'auto'); await f.view.saveDraft('Newer composer text');
+    const state = await f.view.refresh();
+    expect(f.client.steer).toHaveBeenCalledWith('codex', 's', 'active', 'Additional direction', expect.objectContaining({requestId: 'supplement'}));
+    expect(state).toMatchObject({active: true, draft: 'Newer composer text', instructionQueue: {items: [{id: 'original', state: 'dispatching'}]}});
+    expect(state.instructionQueue?.submissions).toContainEqual(expect.objectContaining({id: 'supplement', kind: 'steer', turnId: 'active'}));
+    expect(f.client.turn).not.toHaveBeenCalled(); await f.view.close();
+});
+it('reconciles an unknown queued supplement with the same request after reopening and never replays it', async () => {
+    const f = await queuedSteeringFixture();
+    f.client.steer = vi.fn(async () => {throw {outcome: 'unknown'};});
+    await f.view.enqueue('Additional direction', [], undefined, 'supplement', 'auto'); await f.view.refresh();
+    expect(f.record()?.pending).toMatchObject({requestId: 'supplement', operation: 'steer', turnId: 'active', consumeDraft: false});
+    await f.view.close();
+    vi.mocked(f.client.operation).mockResolvedValue({requestId: 'supplement', outcome: 'committed', result: {turnId: 'active'}});
+    const next = f.open(); await next.read(); await next.refresh();
+    expect(next.snapshot()).toMatchObject({pending: false, active: true, instructionQueue: {paused: true, items: [{id: 'original'}]}});
+    expect(f.client.steer).toHaveBeenCalledOnce(); expect(f.client.turn).not.toHaveBeenCalled(); await next.close();
+});
+it('does not move automatic supplements ahead of explicit next-turn instructions or paused queues', async () => {
+    const f = await queuedSteeringFixture();
+    await f.view.enqueue('Next turn only', [], undefined, 'next');
+    await f.view.enqueue('Later automatic context', [], undefined, 'later', 'auto'); await f.view.refresh();
+    expect(f.client.steer).not.toHaveBeenCalled();
+    await f.view.editInstructionQueue({action: 'remove', id: 'next', expectedRevision: f.view.snapshot().instructionQueue!.revision});
+    await f.view.editInstructionQueue({action: 'pause', expectedRevision: f.view.snapshot().instructionQueue!.revision});
+    await f.view.refresh(); expect(f.client.steer).not.toHaveBeenCalled(); await f.view.close();
+});
+
+it('keeps automatic supplements working when the native executor moved the first supplement to its next turn', async () => {
+    const f = await queuedSteeringFixture();
+    f.client.steer = vi.fn(async () => ({turnId: 'next-active', targetTurnId: 'active'}));
+    await f.view.enqueue('First supplement', [], undefined, 'supplement', 'auto'); await f.view.refresh();
+    expect(f.view.snapshot().instructionQueue?.items).toHaveLength(1);
+    vi.mocked(f.client.read).mockResolvedValue({session: {...session, status: 'active', activeTurnId: 'next-active', lastTurnId: 'active', lastTurnResult: 'completed'}, turns: []});
+    await f.view.read();
+    f.client.steer = vi.fn(async () => ({turnId: 'next-active'}));
+    await f.view.enqueue('Next supplement', [], undefined, 'supplement-next', 'auto'); await f.view.refresh();
+    expect(f.client.steer).toHaveBeenCalledWith('codex', 's', 'next-active', 'Next supplement', expect.objectContaining({requestId: 'supplement-next'}));
+    expect(f.client.turn).not.toHaveBeenCalled(); await f.view.close();
+});
+
+it('does not manufacture a second user message when steering is admitted', async () => {
+    const f = steeringFixture(), view = f.open(); await view.read();
+    await view.steer('Supplement', 'active', [], 'context');
+    expect(view.snapshot().submission).toMatchObject({id: 'context', kind: 'steer', status: 'accepted'});
+    expect(view.snapshot().messages.some(message => message.id.startsWith('steered:'))).toBe(false);
+    expect(f.client.steer).toHaveBeenCalledOnce(); await view.close();
+});
+
+it('projects context updates while running without a metrics RPC and prevents a late read from restoring zero', async () => {
+    const client = peer(), capable = {...profile, capabilities: {...profile.capabilities, metrics: true}};
+    const initial = {observedAt: 1, contextWindow: {usedTokens: 0, limitTokens: 200000}, quota: {windows: [{id: 'primary', usedPercent: 25}]}};
+    client.metrics = vi.fn(async () => initial);
+    const view = new HarnessConversation(client, capable, 'p', 's'); await view.read(); await view.refreshMetrics();
+    let resolve!: (value: typeof initial) => void;
+    vi.mocked(client.metrics).mockImplementationOnce(() => new Promise(done => {resolve = done;}));
+    const reading = view.refreshMetrics(); await vi.waitFor(() => expect(client.metrics).toHaveBeenCalledTimes(2));
+    vi.mocked(client.eventSnapshot).mockResolvedValue({epoch: 'events', cursor: 3, gap: false, requests: [], events: [
+        {seq: 2, message: {method: 'thread/tokenUsage/updated', params: {threadId: 'other', tokenUsage: {modelContextWindow: 200000, last: {totalTokens: 99999}}}}},
+        {seq: 3, message: {method: 'thread/tokenUsage/updated', params: {threadId: 's', tokenUsage: {modelContextWindow: 200000, last: {totalTokens: 12345}, total: {totalTokens: 900000}}}}},
+    ]});
+    expect((await view.refresh()).metrics).toMatchObject({contextWindow: {usedTokens: 12345, limitTokens: 200000}, quota: initial.quota});
+    resolve(initial); await reading;
+    expect(view.snapshot().metrics?.contextWindow?.usedTokens).toBe(12345); expect(client.metrics).toHaveBeenCalledTimes(2);
+    await view.close();
 });
