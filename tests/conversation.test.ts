@@ -276,8 +276,8 @@ it('persists queued native instructions, edits them and dispatches once in order
     expect(vi.mocked(client.turn).mock.calls.map(args => args[3]?.requestId)).toEqual(['queue-first', 'queue-second']);
     await view.refresh(); expect(view.snapshot().instructionQueue?.items).toEqual([]);
     expect(view.snapshot().instructionQueue?.submissions).toEqual([
-        {id: 'queue-first', turnId: 'turn-1', commandId: undefined},
-        {id: 'queue-second', turnId: 'turn-2', commandId: undefined},
+        {id: 'queue-first', turnId: 'turn-1', commandId: undefined, createdAt: expect.any(Number), dispatchedAt: expect.any(Number), acceptedAt: expect.any(Number)},
+        {id: 'queue-second', turnId: 'turn-2', commandId: undefined, createdAt: expect.any(Number), dispatchedAt: expect.any(Number), acceptedAt: expect.any(Number)},
     ]);
     await view.close();
     const reopened = new HarnessConversation(client, profile, 'p', 's', true, journal);
@@ -359,7 +359,7 @@ it('queues native commands through the command protocol and retries only a defin
     expect(view.snapshot().instructionQueue?.items).toEqual([]); await view.close();
 });
 
-it('restores a preparation-rejected EIO queue entry and waits for an explicit new attempt', async () => {
+it.each(['retry', 'resume'] as const)('restores a preparation-rejected EIO queue entry and starts a new attempt only after explicit %s', async action => {
     const client = peer(); let saved: HarnessRecovery | undefined; const attempts: string[] = [];
     const capable = {...profile, capabilities: {...profile.capabilities, slashCommands: true}};
     const native = new MCPHarnessClient({close: vi.fn(), call: async (name, args) => {
@@ -377,7 +377,7 @@ it('restores a preparation-rejected EIO queue entry and waits for an explicit ne
     await first.close();
     const restored = new HarnessConversation(client, capable, 'p', 's', true, journal); await restored.read(); await restored.refresh();
     expect(attempts).toEqual(['preparation-failed']); expect(client.operation).not.toHaveBeenCalled();
-    await restored.editInstructionQueue({action: 'retry', id: 'preparation-failed', expectedRevision: restored.snapshot().instructionQueue!.revision});
+    await restored.editInstructionQueue({action, ...(action === 'retry' ? {id: 'preparation-failed'} : {}), expectedRevision: restored.snapshot().instructionQueue!.revision});
     await restored.refresh(); await restored.refresh();
     expect(attempts).toHaveLength(2); expect(attempts[1]).not.toBe(attempts[0]);
     expect(restored.snapshot().instructionQueue?.items).toEqual([]);

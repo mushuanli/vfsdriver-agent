@@ -7,7 +7,13 @@ export interface HarnessProfile {
     id: string; kind: string; projectRuntime?: boolean; workspaces: Array<{ id: string }>;
     capabilities: { models?: boolean; slashCommands?: boolean; commandQueries?: boolean; commandOutputs?: boolean; usage?: boolean; history: boolean; create: boolean; resume: boolean; interrupt: boolean; interactions: boolean; fork?: boolean; checkpointFork?: boolean; search?: boolean; searchPrompts?: boolean; searchKeywords?: boolean; rename?: boolean; archive?: boolean; unarchive?: boolean; delete?: boolean; attachments?: Array<'text' | 'image'> };
 }
+export interface HarnessWriterLock {
+    status: 'held' | 'not-held' | 'unknown'; checkedAt: number; acquiredAt?: number | null;
+    lockFileModifiedAt?: number | null; code?: string;
+    owner?: {pid: number; uid?: number | null; processStartedAt?: number | null};
+}
 export interface HarnessSession {
+    writerLock?: HarnessWriterLock;
     usage?: HarnessUsage; usageUnavailable?: boolean;
     id: string; title: string; cwd: string | null; status: string | null; updatedAt: number | null; resumable: boolean;
     createdAt?: number | null;

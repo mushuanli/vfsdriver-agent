@@ -1,10 +1,12 @@
 # @itookit/nestos-node-driver
 
+精确 turn 的已确认终态保存在原队列项 terminal 内，经既有 journal.save 持久化，重启可复用；不同 turn、未知提交与会话空闲本身不能解除队首屏障。inspect 的 lastTurnResult 必须与 lastTurnId 成对使用；空闲且队首缺终态时最多每 15 秒核对一次原生历史，无 inspect 能力也能核对。projection.reason 只解释等待条件，不改变执行准入。
+
 平台无关的 nestos-node 接入层。文件与进程实现位于 src/files，同步 HTTP 协议与 harness MCP 协议归本包。不得依赖旧 vfsdriver-agent 包。
 不得依赖 app-core、UI 或宿主 API。连接配置与目录授权策略归 app-core；凭据解析与 fetch 由宿主注入。
 文件、同步与 harness 各自拥有生命周期。关闭控制面板只关闭客户端等待，不把连接断开当作 turn 已停止。
 修改操作携带 epoch 与 requestId；结果未知时查询 receipt，不自动重放。
-可信节点回执明确 not-committed 时，即使 code=EIO 也不能重新分类为 unknown。队列保留原接纳身份、失败状态及暂停；重开不自动派发，显式 retry 才创建新的原生 attempt，原 requestId 的拒绝事实保持不变。
+可信节点回执明确 not-committed 时，即使 code=EIO 也不能重新分类为 unknown。队列保留原接纳身份、失败状态及暂停；重开不自动派发，用户显式 retry 或 resume 才为失败项创建新的原生 attempt，原 requestId 的拒绝事实保持不变。resume 先拒绝任何 uncertain 项，再原子准备失败项重试及解除暂停；保存失败不派发。
 原生命令由 profile.capabilities.slashCommands 协商，commands 查询会话目录、command 执行并沿用 receipt；不在客户端按 harness 名猜测命令或 RPC。命令与普通 turn 分开，命令可无 turnId；未知操作保存 inputText，核对接纳时只清理匹配草稿，保留后续输入。旧节点不宣称能力时不发新协议请求。
 验证：pnpm --filter @itookit/nestos-node-driver test / typecheck。
 
@@ -28,7 +30,9 @@ HarnessRecovery 持久化最近已接纳的 submittedTurnId，重开后与 pendi
 
 SSE 的连接、主题与观察者故障分别处理；单个 next/error 回调抛错不能使其他订阅失效或阻断重连。HarnessEventFeed 与目录通知逐个隔离观察者，诊断只输出安全类别，不记录异常正文。
 
-HarnessInstructionRuntime 将指令队列持久化到 HarnessRecovery，enqueue 接纳与原生 turn/command 回执分开。队列编辑带 revision，派发先保存领取，未知结果只核对原 requestId；明确拒绝后显式重试才分配新的原生 attemptId。宿主共享控制面并保留后台观察，UI 关闭不拥有队列；snapshot 只投影排队附件名称。
+HarnessInstructionRuntime 将指令队列持久化到 HarnessRecovery，enqueue 接纳与原生 turn/command 回执分开。队列编辑带 revision，派发先保存领取，未知结果只核对原 requestId；明确拒绝后点击重新提交或继续队列才分配新的原生 attemptId。resume.retry 日志保留原 operationId、新 attemptId、阶段、结果与耗时。宿主共享控制面并保留后台观察，UI 关闭不拥有队列；snapshot 只投影排队附件名称。
+
+队列的 createdAt、dispatchedAt、acceptedAt 分别记录持久接纳、派发领取及原生接纳时间，随原恢复记录与回执投影保存；旧记录缺失时不补造，重试清除旧 attempt 的派发/接纳时间。合并保留原接纳回执，只改变仍待发送的正文和附件；运行中输入仍按队列等待，不绕过当前 turn 的执行屏障。
 
 命令 execution=query 可在 active 时直接查询，跳过 resume/adopt；旧目录缺失 execution 时保守串行。队列冻结定义 id/revision，发出 expectedCommand 后由原生节点复验；查询不能覆盖队列项自己的持久回执。异步命令需确切 turn 或 command 终态才续发，恢复时同样适用；scope/loaded 明确区分受控进程与外部历史。
 

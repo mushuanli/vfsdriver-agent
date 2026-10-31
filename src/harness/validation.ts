@@ -1,6 +1,7 @@
 import {terminalTurn} from './history-completion';
 import { FSError } from '@itookit/vfs-core';
 import { validateUsage } from './usage';
+import {validateWriterLock} from './writer-lock';
 import type { HarnessEvents, HarnessHistory, HarnessPage, HarnessProfile, HarnessReceipt, HarnessSession } from './contracts';
 
 function record(value: unknown): Record<string, unknown> {
@@ -37,7 +38,7 @@ export function validateSession(value: unknown): HarnessSession {
     const usage = v.usage === undefined ? undefined : validateUsage(v.usage, v.id as string);
     if (v.usageUnavailable !== undefined && typeof v.usageUnavailable !== 'boolean') throw invalid();
     const native = v.native && typeof v.native === 'object' ? v.native as Record<string, unknown> : {};
-    return {...v, usage, title: [v.title, native.name, native.preview].find(text => typeof text === 'string' && text.trim())?.toString().trim() ?? '',
+    return {...v, usage, writerLock: validateWriterLock(v.writerLock), title: [v.title, native.name, native.preview].find(text => typeof text === 'string' && text.trim())?.toString().trim() ?? '',
         lastTurnResult: v.lastTurnResult ?? undefined,
         createdAt: sessionTime(v.createdAt ?? native.createdAt), updatedAt: sessionTime(v.updatedAt ?? native.updatedAt)} as unknown as HarnessSession;
 }

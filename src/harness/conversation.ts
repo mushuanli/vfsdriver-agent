@@ -235,7 +235,7 @@ export class HarnessConversation implements HarnessConversationPort {
             attachments: this.writable ? this.profile.capabilities.attachments : undefined,
             deletedSessionIds: this.deletedSessionIds.slice(),
             archived: !!this.session?.archived,
-            createdAt: this.session?.createdAt, updatedAt: this.session?.updatedAt,
+            createdAt: this.session?.createdAt, updatedAt: this.session?.updatedAt, writerLock: this.session?.writerLock,
             branchName: this.session?.branchName ?? (this.session?.parentSessionId ? undefined : 'main'),
             ...(this.profile.capabilities.fork !== undefined ? {forkSupport: this.profile.capabilities.checkpointFork ? 'turn' as const
                 : this.profile.capabilities.fork ? 'latest' as const : 'none' as const} : {}),

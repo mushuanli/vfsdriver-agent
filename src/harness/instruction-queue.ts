@@ -12,18 +12,18 @@ export interface HarnessInstruction {
     commandKind?: 'prompt' | 'action';
     commandId?: string; commandRevision?: string;
     receipt?: InstructionReceipt;
-    createdAt: number; state: 'pending' | 'dispatching' | 'failed' | 'uncertain'; error?: string;
+    createdAt: number; dispatchedAt?: number; acceptedAt?: number; state: 'pending' | 'dispatching' | 'failed' | 'uncertain'; error?: string;
 }
 export interface HarnessInstructionQueue {
     revision: number; paused: boolean; items: HarnessInstruction[];
-    receipts: Array<{id: string; input: string; turnId?: string; commandId?: string}>;
+    receipts: Array<{id: string; input: string; turnId?: string; commandId?: string; createdAt?: number; dispatchedAt?: number; acceptedAt?: number}>;
 }
 export type HarnessQueueEdit = {expectedRevision: number} & (
     {action: 'pause' | 'resume'} | {action: 'remove' | 'retry'; id: string}
     | {action: 'update'; id: string; text: string} | {action: 'reorder' | 'merge'; ids: string[]});
 export type HarnessQueueProjection = Omit<HarnessInstructionQueue, 'items' | 'receipts'> & {
     acceptedIds: string[];
-    submissions?: Array<{id: string; turnId?: string; commandId?: string}>;
+    submissions?: Array<{id: string; turnId?: string; commandId?: string; createdAt?: number; dispatchedAt?: number; acceptedAt?: number}>;
     items: Array<Omit<HarnessInstruction, 'attachments'> & {files: Array<{name: string}>}>;
 };
 type InstructionReceipt = Pick<NonNullable<HarnessConversationSnapshot['submission']>, 'turnId' | 'commandId' | 'commandStatus' | 'failed' | 'resultError'>;
@@ -60,7 +60,7 @@ export class HarnessInstructionRuntime {
     }
     projection(): HarnessQueueProjection {
         return {revision: this.record.revision, paused: this.record.paused, acceptedIds: this.record.receipts.map(row => row.id),
-            submissions: this.record.receipts.map(({id, turnId, commandId}) => ({id, turnId, commandId})),
+            submissions: this.record.receipts.map(({id, turnId, commandId, createdAt, dispatchedAt, acceptedAt}) => ({id, turnId, commandId, createdAt, dispatchedAt, acceptedAt})),
             items: this.record.items.map(({attachments, ...item}) => ({...structuredClone(item), files: attachments.map(({name}) => ({name}))}))};
     }
     hasReceipt(id: string): boolean {return this.record.receipts.some(row => row.id === id);}
@@ -78,7 +78,7 @@ export class HarnessInstructionRuntime {
         validateNewInput(item);
         if (this.record.items.length >= 100) throw new FSError('EFBIG', 'Instruction queue is full (100 instructions)');
         const items = [...this.record.items, structuredClone(item)];
-        const receipts = [...this.record.receipts, {id: item.id, input}], active = new Set(items.map(row => row.id));
+        const receipts = [...this.record.receipts, {id: item.id, input, createdAt: item.createdAt}], active = new Set(items.map(row => row.id));
         while (receipts.length > 256) receipts.splice(receipts.findIndex(row => !active.has(row.id)), 1);
         await this.commit({...this.record, items, receipts}, 'enqueue', item.id);
     }
@@ -89,12 +89,15 @@ export class HarnessInstructionRuntime {
         });
     }
     private async change(edit: HarnessQueueEdit, binding?: {id?: string; revision?: string}): Promise<void> {
+        const started = Date.now();
         await this.sync();
         if (!edit || edit.expectedRevision !== this.record.revision) throw fail('Instruction queue changed; refresh before editing');
         const next = structuredClone(this.record);
+        const retried = edit.action === 'resume' ? next.items.filter(item => item.state === 'failed').map(item => item.id) : [];
         this.apply(next, edit);
         if (edit.action === 'update') {const item = this.editable(next,edit.id); item.commandId = binding?.id; item.commandRevision = binding?.revision;}
         await this.commit(next, edit.action);
+        for (const id of retried) this.log('resume.retry', 'success', started, id);
     }
     private editable(queue: HarnessInstructionQueue, id: string, failed = false): HarnessInstruction {
         const item = queue.items.find(row => row.id === id);
@@ -105,7 +108,8 @@ export class HarnessInstructionRuntime {
         switch (edit.action) {
             case 'pause': queue.paused = true; return;
             case 'resume':
-                if (queue.items.some(row => row.state === 'failed' || row.state === 'uncertain')) throw fail('Resolve failed or uncertain instructions before resuming');
+                if (queue.items.some(row => row.state === 'uncertain')) throw fail('Resolve uncertain instructions before resuming');
+                for (const item of queue.items) if (item.state === 'failed') this.retry(queue, item.id);
                 queue.paused = false; return;
             case 'update': return this.updateText(queue, edit.id, edit.text);
             case 'remove': this.editable(queue, edit.id, true); queue.items = queue.items.filter(row => row.id !== edit.id); return;
@@ -126,6 +130,7 @@ export class HarnessInstructionRuntime {
         if (item.state !== 'failed') throw fail('Only rejected instructions can be retried');
         validateNewInput(item);
         item.state = 'pending'; item.attemptId = requestId(); item.error = undefined; queue.paused = false;
+        item.dispatchedAt = undefined; item.acceptedAt = undefined;
     }
     private reorder(queue: HarnessInstructionQueue, ids: string[]): void {
         if (!Array.isArray(ids) || new Set(ids).size !== ids.length || ids.length !== queue.items.filter(row => row.state === 'pending').length)
@@ -156,6 +161,7 @@ export class HarnessInstructionRuntime {
     }
     private log(stage: string, result: string, started: number, operationId?: string, error?: unknown): void {
         const metadata = {operation: 'harness.instructions', stage, result, operationId,
+            attemptId: operationId ? this.record.items.find(item => item.id === operationId)?.attemptId : undefined,
             revision: this.record.revision, count: this.record.items.length, durationMs: Date.now() - started,
             code: error ? (error as {attachmentCode?: string}).attachmentCode ?? (error as {remoteCode?: string}).remoteCode ?? (error as {code?: string}).code ?? 'EIO' : undefined};
         if (error) console.warn('[Harness] Instruction queue', metadata); else console.info('[Harness] Instruction queue', metadata);
@@ -193,7 +199,9 @@ export class HarnessInstructionRuntime {
         const item = this.record.items[0]; if (!item || item.state === 'failed') return;
         if (item.state !== 'pending') return {item: structuredClone(item), dispatch: false};
         if (this.record.paused || !this.ports.snapshot().canSend) return;
-        await this.commit({...this.record, items: this.record.items.map(row => row === item ? {...row, state: 'dispatching'} : row)}, 'claim', item.id);
+        const dispatchedAt = Date.now();
+        await this.commit({...this.record, items: this.record.items.map(row => row === item ? {...row, state: 'dispatching', dispatchedAt} : row),
+            receipts: this.record.receipts.map(row => row.id === item.id ? {...row, dispatchedAt, acceptedAt: undefined} : row)}, 'claim', item.id);
         return {item: structuredClone(this.record.items[0]), dispatch: true};
     }
     private current(expected: HarnessInstruction): HarnessInstruction | undefined {
@@ -242,9 +250,10 @@ export class HarnessInstructionRuntime {
     }
     private async rememberReceipt(item: HarnessInstruction, source: InstructionReceipt): Promise<void> {
         const {turnId,commandId} = source, receipt = receiptData(source);
+        const acceptedAt = item.acceptedAt ?? Date.now();
         await this.commit({...this.record,
-            receipts: this.record.receipts.map(row => row.id === item.id ? {...row, turnId, commandId} : row),
-            items: this.record.items.map(row => row.id === item.id ? {...row,receipt} : row)}, 'admitted',item.id);
+            receipts: this.record.receipts.map(row => row.id === item.id ? {...row, turnId, commandId, acceptedAt} : row),
+            items: this.record.items.map(row => row.id === item.id ? {...row,receipt, acceptedAt} : row)}, 'admitted',item.id);
     }
     private async markUnknown(item: HarnessInstruction): Promise<void> {
         if (item.state === 'uncertain') return;
@@ -303,6 +312,8 @@ function validateInstruction(item: HarnessInstruction): void {
     if (!item || !validId(item.id) || !hasInstructionInput(item) || !Number.isFinite(item.createdAt)
         || !['pending', 'dispatching', 'failed', 'uncertain'].includes(item.state)) throw new FSError('EINVAL', 'Invalid native instruction');
     validateInstructionOptions(item);
+    if ([item.dispatchedAt, item.acceptedAt].some(value => value !== undefined && (!Number.isFinite(value) || value <= 0)))
+        throw new FSError('EINVAL', 'Invalid native instruction timing');
     readStoredAttachments(item.attachments);
     if (item.selection) validateModelSelection(item.selection);
 }
