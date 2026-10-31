@@ -38,6 +38,24 @@ it('merges pending inputs in queue order while retaining the original admission 
     expect(f.runtime.projection().items).toHaveLength(1);
 });
 
+it('persists exact terminal evidence before idleness and uses it after restart without resending the admitted head', async () => {
+    const f = fixture(); await f.enqueue('first'); await f.enqueue('second'); f.idle(); await f.runtime.pump();
+    f.ports.completion.mockReturnValue('completed'); await f.runtime.pump();
+    expect(f.runtime.record.items[0].terminal).toMatchObject({turnId: 'turn', result: 'completed', observedAt: expect.any(Number)});
+    const saved = structuredClone(f.runtime.record); f.runtime.restore(saved); f.ports.completion.mockReturnValue(undefined);
+    f.idle(); await f.runtime.pump();
+    expect(f.runtime.record.items.map(item => item.id)).toEqual(['second']);
+    expect(f.ports.send.mock.calls.map(([item]) => item.id)).toEqual(['first', 'second']);
+});
+
+it('rejects persisted terminal evidence belonging to another admitted turn', async () => {
+    const f = fixture(); await f.enqueue('first'); f.idle(); await f.runtime.pump();
+    const saved = structuredClone(f.runtime.record);
+    saved.items[0].terminal = {turnId: 'another-turn', result: 'completed', observedAt: Date.now()};
+    expect(() => f.runtime.restore(saved)).toThrow('Invalid instruction terminal evidence');
+    expect(f.ports.send).toHaveBeenCalledOnce();
+});
+
 it('resumes a rejected head with a fresh attempt and continues in order after its terminal result', async () => {
     const f = fixture(); await f.enqueue('first'); await f.enqueue('second'); f.idle();
     f.ports.send.mockRejectedValueOnce(Object.assign(new Error('Occupied'), {outcome: 'not-committed', remoteCode: 'HARNESS_SESSION_BUSY'}));

@@ -182,6 +182,7 @@ export class HarnessConversation implements HarnessConversationPort {
     private observedAt = 0;
     private source: 'history' | 'events' = 'history';
     private inspectedAt = 0;
+    private terminalReadAt = 0;
     private closing?: Promise<void>;
     private readonly lifetime = new AbortController();
     constructor(private readonly client: HarnessClient, private readonly profile: HarnessProfile,
@@ -229,7 +230,7 @@ export class HarnessConversation implements HarnessConversationPort {
         if (this.commandResults.some(row => row.status === 'running') && observation.execution === 'idle') observation.execution = 'running';
         const active = ['running', 'waiting-approval', 'waiting-input'].includes(observation.execution);
         const actions = this.actions(observation);
-        const queue = this.instructions.projection();
+        const queue = this.instructions.projection(observation);
         observation.canInterrupt = actions.canInterrupt; observation.canRespond = actions.canRespond;
         return {resultError: commandResultIssue(this.commandResults), ...(this.profile.capabilities.models ? {supportsModels: true} : {}), ...(this.profile.capabilities.slashCommands ? {supportsSlashCommands: true} : {}), ...(this.nativeCommands.length ? {slashCommands: this.availableCommands()} : {}), usage: this.session?.usage, usageUnavailable: this.session?.usageUnavailable, observation, submission: this.submission ? {...this.submission} : undefined, submittedTurnId: this.submittedTurnId, draft: this.draft, draftAttachments: structuredClone(this.draftAttachments), sessionId: this.navigationSessionId ?? this.session?.id, title: this.session?.title.trim() || this.profile.kind,
             attachments: this.writable ? this.profile.capabilities.attachments : undefined,
@@ -561,7 +562,10 @@ export class HarnessConversation implements HarnessConversationPort {
             if (repair) { stage = 'history'; await this.read(); this.gap = true; }
             stage = 'projection';
             if (!repair) this.consume(page);
-            if (!repair && !this.busy) {stage = 'inspect'; await this.inspect(page);}
+            if (!repair && !this.busy) {
+                stage = 'inspect'; await this.inspect(page);
+                stage = 'history'; await this.recoverQueuedTerminal();
+            }
             if (!repair && page.events.some(e => e.message.method === 'turn/completed' && e.message.params?.threadId === this.session?.id)) {
                 stage = 'history'; await this.read();
             }
@@ -585,8 +589,15 @@ export class HarnessConversation implements HarnessConversationPort {
         if (!this.session || !this.client.inspect || Date.now() - this.inspectedAt < 15_000) return;
         this.session = (await this.client.inspect(this.profile.id, this.session.id, this.options())).session;
         this.observedAt = Date.now(); this.inspectedAt = this.observedAt;
+        if (this.session.lastTurnId) this.recordTurnResult(this.session.lastTurnId, this.session.lastTurnResult);
         this.requests = page.requests.filter(r => r.params?.threadId === this.session?.id).flatMap(nativeRequest);
         this.nativeDisconnected = false;
+    }
+    private async recoverQueuedTerminal(): Promise<void> {
+        const head = this.instructions.record.items[0], turnId = head?.receipt?.turnId;
+        if (!turnId || head.terminal || this.turnResults.has(turnId) || this.session?.status !== 'idle'
+            || this.session.activeTurnId || Date.now() - this.terminalReadAt < 15_000) return;
+        this.terminalReadAt = Date.now(); await this.read();
     }
     private consume(page: HarnessEvents) {
         for (const {message, timestamp} of page.events) {

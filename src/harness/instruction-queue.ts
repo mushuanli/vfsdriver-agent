@@ -6,12 +6,14 @@ import {requestId} from '../files/request-id';
 import type {HarnessAttachment, HarnessModelSelection} from './contracts';
 import type {HarnessConversationSnapshot} from './conversation-snapshot';
 import {COMMAND_ID_LIMIT} from './command-output';
+import type {HarnessObservation} from './state';
 
 export interface HarnessInstruction {
     id: string; attemptId?: string; text: string; attachments: HarnessAttachment[]; selection?: HarnessModelSelection;
     commandKind?: 'prompt' | 'action';
     commandId?: string; commandRevision?: string;
     receipt?: InstructionReceipt;
+    terminal?: {turnId: string; result: 'completed' | 'failed' | 'cancelled'; observedAt: number};
     createdAt: number; dispatchedAt?: number; acceptedAt?: number; state: 'pending' | 'dispatching' | 'failed' | 'uncertain'; error?: string;
 }
 export interface HarnessInstructionQueue {
@@ -22,12 +24,14 @@ export type HarnessQueueEdit = {expectedRevision: number} & (
     {action: 'pause' | 'resume'} | {action: 'remove' | 'retry'; id: string}
     | {action: 'update'; id: string; text: string} | {action: 'reorder' | 'merge'; ids: string[]});
 export type HarnessQueueProjection = Omit<HarnessInstructionQueue, 'items' | 'receipts'> & {
+    reason?: string;
     acceptedIds: string[];
     submissions?: Array<{id: string; turnId?: string; commandId?: string; createdAt?: number; dispatchedAt?: number; acceptedAt?: number}>;
     items: Array<Omit<HarnessInstruction, 'attachments'> & {files: Array<{name: string}>}>;
 };
 type InstructionReceipt = Pick<NonNullable<HarnessConversationSnapshot['submission']>, 'turnId' | 'commandId' | 'commandStatus' | 'failed' | 'resultError'>;
 type SubmissionReceipt = NonNullable<HarnessConversationSnapshot['submission']>;
+type TerminalResult = NonNullable<HarnessInstruction['terminal']>['result'];
 interface Ports {
     save(): Promise<void>;
     load(): Promise<HarnessInstructionQueue | undefined>;
@@ -58,12 +62,30 @@ export class HarnessInstructionRuntime {
         this.record = structuredClone(record);
         this.needsReload = false;
     }
-    projection(): HarnessQueueProjection {
-        return {revision: this.record.revision, paused: this.record.paused, acceptedIds: this.record.receipts.map(row => row.id),
+    projection(observation?: HarnessObservation): HarnessQueueProjection {
+        const reason = observation && this.reason(observation);
+        return {revision: this.record.revision, paused: this.record.paused, ...(reason ? {reason} : {}), acceptedIds: this.record.receipts.map(row => row.id),
             submissions: this.record.receipts.map(({id, turnId, commandId, createdAt, dispatchedAt, acceptedAt}) => ({id, turnId, commandId, createdAt, dispatchedAt, acceptedAt})),
             items: this.record.items.map(({attachments, ...item}) => ({...structuredClone(item), files: attachments.map(({name}) => ({name}))}))};
     }
     hasReceipt(id: string): boolean {return this.record.receipts.some(row => row.id === id);}
+    private reason(observation: HarnessObservation): string | undefined {
+        const head = this.record.items[0]; if (!head) return;
+        if (head.state === 'failed') return 'rejected';
+        if (head.state === 'uncertain') return 'recovery';
+        if (this.record.paused) return 'paused';
+        return this.observationReason(observation) ?? this.receiptReason(head, observation);
+    }
+    private observationReason(observation: HarnessObservation): string | undefined {
+        if (observation.connection !== 'online') return 'remote-offline';
+        if (['waiting-approval', 'waiting-input'].includes(observation.execution)) return 'awaiting-interaction';
+        if (observation.execution === 'running') return 'active-turn';
+    }
+    private receiptReason(head: HarnessInstruction, observation: HarnessObservation): string | undefined {
+        if (observation.receiptUnknown || head.state === 'dispatching' && !head.receipt) return 'admission-unconfirmed';
+        const turnId = head.receipt?.turnId;
+        if (turnId && !head.terminal && !this.ports.completion(turnId)) return 'terminal-unconfirmed';
+    }
     reload(): Promise<void> {return this.serialize(async () => this.restore(await this.ports.load()));}
     synchronize(): Promise<void> {return this.serialize(() => this.sync());}
     private async sync(): Promise<void> {if (this.needsReload) this.restore(await this.ports.load());}
@@ -265,14 +287,26 @@ export class HarnessInstructionRuntime {
             items: this.record.items.map(row => row.id === item.id ? {...row, state: 'failed', error: code} : row)}, 'rejected', item.id);
     }
     private async complete(item: HarnessInstruction, snapshot: HarnessConversationSnapshot, receipt: SubmissionReceipt): Promise<void> {
-        if (!idleSnapshot(snapshot)) return;
         const command = receipt.commandId ? this.ports.command(receipt.commandId) : undefined;
         const turnId = receipt.turnId ?? command?.turnId;
-        const completion = turnId ? this.ports.completion(turnId) : undefined;
+        const completion = this.terminalResult(item, turnId);
+        await this.rememberTerminal(item, receipt.turnId, completion);
+        if (!idleSnapshot(snapshot)) return;
         if (awaitingCompletion(turnId, completion, command?.status ?? receipt.commandStatus)) return;
         const failed = failedReceipt(completion, command, receipt);
         await this.commit({...this.record, paused: this.record.paused || failed,
             items: this.record.items.filter(row => row.id !== item.id)}, 'settled', item.id);
+    }
+    private terminalResult(item: HarnessInstruction, turnId?: string): TerminalResult | undefined {
+        const observed = turnId ? this.ports.completion(turnId) : undefined;
+        const saved = item.terminal?.turnId === turnId ? item.terminal?.result : undefined;
+        if (saved && observed && saved !== observed) throw fail('Conflicting instruction terminal evidence');
+        return observed ?? saved;
+    }
+    private async rememberTerminal(item: HarnessInstruction, turnId?: string, result?: TerminalResult): Promise<void> {
+        if (!turnId || !result || item.terminal) return;
+        const terminal = {turnId, result, observedAt: Date.now()};
+        await this.commit({...this.record, items: this.record.items.map(row => row.id === item.id ? {...row, terminal} : row)}, 'terminal.confirmed', item.id);
     }
 }
 function currentReceipt(item: HarnessInstruction, snapshot: HarnessConversationSnapshot): SubmissionReceipt | undefined {
@@ -328,6 +362,9 @@ function validateNewInput(item: HarnessInstruction): void {
     } catch (error) {throw Object.assign(error as Error, {outcome: 'not-committed'});}
 }
 function validateInstructionOptions(item: HarnessInstruction): void {
+    if (item.terminal !== undefined && (!item.terminal || typeof item.terminal.turnId !== 'string' || !item.terminal.turnId || item.terminal.turnId.length > 1024 || item.terminal.turnId !== item.receipt?.turnId
+        || !['completed', 'failed', 'cancelled'].includes(item.terminal.result) || !Number.isFinite(item.terminal.observedAt) || item.terminal.observedAt <= 0))
+        throw new FSError('EINVAL', 'Invalid instruction terminal evidence');
     if (item.attemptId !== undefined && !validId(item.attemptId)) throw new FSError('EINVAL', 'Invalid native instruction attempt');
     if (item.commandKind !== undefined && !['prompt', 'action'].includes(item.commandKind)) throw new FSError('EINVAL', 'Invalid native command kind');
     for (const value of [item.commandId, item.commandRevision])
