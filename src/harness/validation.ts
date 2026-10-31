@@ -1,3 +1,4 @@
+import {validateExecutionRecovery} from './execution-recovery';
 import {terminalTurn} from './history-completion';
 import { FSError } from '@itookit/vfs-core';
 import { validateUsage } from './usage';
@@ -34,11 +35,12 @@ export function validateSession(value: unknown): HarnessSession {
         if (typeof status.type !== 'string' || status.activeFlags !== undefined && (!Array.isArray(status.activeFlags)
             || status.activeFlags.some(flag => typeof flag !== 'string'))) throw invalid();
     }
+    if (v.historyRevision !== undefined && (typeof v.historyRevision !== 'string' || !/^[a-f0-9]{64}$/.test(v.historyRevision))) throw invalid();
     if (v.lastTurnResult !== undefined && v.lastTurnResult !== null && !['completed', 'failed', 'cancelled'].includes(String(v.lastTurnResult))) throw invalid();
     const usage = v.usage === undefined ? undefined : validateUsage(v.usage, v.id as string);
     if (v.usageUnavailable !== undefined && typeof v.usageUnavailable !== 'boolean') throw invalid();
     const native = v.native && typeof v.native === 'object' ? v.native as Record<string, unknown> : {};
-    return {...v, usage, writerLock: validateWriterLock(v.writerLock), title: [v.title, native.name, native.preview].find(text => typeof text === 'string' && text.trim())?.toString().trim() ?? '',
+    return {...v, executionRecovery: validateExecutionRecovery(v.executionRecovery), usage, writerLock: validateWriterLock(v.writerLock), title: [v.title, native.name, native.preview].find(text => typeof text === 'string' && text.trim())?.toString().trim() ?? '',
         lastTurnResult: v.lastTurnResult ?? undefined,
         createdAt: sessionTime(v.createdAt ?? native.createdAt), updatedAt: sessionTime(v.updatedAt ?? native.updatedAt)} as unknown as HarnessSession;
 }
@@ -52,7 +54,7 @@ export function validateProfiles(value: unknown): { epoch: string; profiles: Har
             || p.workspaces.some(w => typeof record(w).id !== 'string')
             || (caps.fork !== undefined && typeof caps.fork !== 'boolean')
             || (caps.search !== undefined && typeof caps.search !== 'boolean')
-            || ['models', 'slashCommands', 'commandQueries', 'commandOutputs', 'usage', 'checkpointFork', 'searchPrompts', 'searchKeywords', 'rename', 'archive', 'unarchive', 'delete'].some(key => caps[key] !== undefined && typeof caps[key] !== 'boolean')
+            || ['executionRecovery', 'models', 'slashCommands', 'commandQueries', 'commandOutputs', 'usage', 'checkpointFork', 'searchPrompts', 'searchKeywords', 'rename', 'archive', 'unarchive', 'delete'].some(key => caps[key] !== undefined && typeof caps[key] !== 'boolean')
             || caps.checkpointFork === true && caps.fork !== true
             || caps.commandQueries === true && caps.slashCommands !== true
             || caps.commandOutputs === true && caps.slashCommands !== true

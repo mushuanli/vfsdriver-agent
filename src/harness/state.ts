@@ -1,9 +1,12 @@
+import {detachedExecution} from './execution-recovery';
 import type { HarnessSession, HarnessEvent } from './contracts';
 import type { HarnessObservationError } from './observation-errors';
 export type { HarnessObservationError } from './observation-errors';
 
 export type HarnessExecutionState = 'unknown' | 'idle' | 'running' | 'waiting-approval' | 'waiting-input';
 export interface HarnessObservation {
+    historyRevision?: string;
+    activity?: import('./activity').HarnessActivity;
     execution: HarnessExecutionState;
     scope?: 'controlled' | 'external';
     loaded?: boolean;
@@ -35,7 +38,7 @@ export function harnessObservation(session: HarnessSession | undefined, requests
     const waitingApproval = requests.some(r => r.kind === 'approval') || flags.includes('waitingOnApproval');
     const waitingInput = requests.some(r => r.kind === 'input') || flags.includes('waitingOnUserInput');
     const execution = waitingApproval ? 'waiting-approval' : waitingInput ? 'waiting-input'
-        : session?.activeTurnId || session?.status === 'active' ? 'running' : session?.status === 'idle' ? 'idle' : 'unknown';
+        : session?.activeTurnId || session?.status === 'active' ? 'running' : session?.status === 'idle' || detachedExecution(session) ? 'idle' : 'unknown';
     return {execution, scope: session?.owned ? 'controlled' : 'external', loaded: session?.loaded ?? (session?.status === 'notLoaded' ? false : session?.owned ? true : undefined), updatedAt: session?.updatedAt, rawStatus: session?.status ?? null, nativeError: session?.status === 'systemError', lastResult: session?.lastTurnResult,
         activeTurnId: session?.activeTurnId, owned: !!session?.owned, observedAt: Date.now(), source: 'history',
         connection: 'online', stale: false, receiptUnknown: false, canInterrupt: false, canRespond: false, ...evidence};

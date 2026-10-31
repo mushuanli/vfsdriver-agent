@@ -215,3 +215,17 @@ revision and input matching rules. Queue admission and the host OperationLedger 
 the authority for consuming the submitted editor draft.
 
 文件 HTTP 错误保留标准 VFS `code`，并以 `remoteCode` 传递经过格式校验的服务端原因（如 `METADATA_IO`）。只有状态码或服务端错误码时，默认提示包含二者，便于区分网络连接失败与已送达的服务端异常。
+
+### 执行结果未知时的人工恢复
+
+原生事件另投影 `observation.activity`（turnId、phase、updatedAt），仅用于展示思考、工具执行、回复输出、上下文整理或等待下一次输出。空正文 reasoning item 也可更新阶段；旧轮次和倒序事件不能更新当前轮次。该字段不改变执行状态、队列屏障或终态；updatedAt 来自实际事件，不能用 inspect、心跳或本地计时刷新。
+
+Codex 的 `session.historyRevision` 独立于本运行时的事件游标，表示原生持久文件的版本。既有 15 秒 inspect 发现版本变化时，外部会话补读历史；内部空闲会话在没有近期内容事件时也补读，内部执行中的流式事件路径保持不变。成功读取后才更新 `observation.historyRevision`，失败保留原消息、原版本并显示具体错误。事件故障的历史核对也覆盖没有队首的会话，不接管原生执行、不重发输入。
+
+远程执行以节点原生状态、写锁与历史为准，httpd 的持久队列只记录提交及调度事实。协商 `capabilities.executionRecovery` 后，节点在历史与 inspect 的 `session.executionRecovery` 返回运行时身份、PID、启动时间及 running/detached/unknown。只有原生会话 notLoaded、未被本节点接管、没有 activeTurnId 且写锁确认为 not-held 时才声明 detached；PID 或锁文件缺失本身不充当 turn 终态。
+
+已接纳队首等待超过 60 秒仍没有精确终态时，队列投影提供 `recovery.id`。界面经二次确认调用 `editInstructionQueue({action:'recover',id,expectedRevision})`：先读原生历史并重新 inspect，不依赖 httpd 缓存；真实终态正常结算，否则仅允许 detached 的普通已接纳 turn 结束等待。原生仍运行、写锁占用/未知、未决提交或控制操作、命令及身份冲突均拒绝。恢复决策以 outcome=unknown、原 turn/attempt、节点证据和时间存入原 journal 的 instructionQueue.recoveries（最多64项，不自动淘汰），已接纳输入同时保存可用的原运行时证据；保存失败不移除队首。
+
+Codex rollout 的终态可能以仅含 id/status、items 为空的轮次返回；客户端仍按精确 ID 结算，不要求有助手正文。重开会话不能把缺失终态当完成；人工 unknown 恢复和后续暂停均从原 journal 恢复，保存失败保留原队首。
+
+恢复不产生 completed/cancelled，不重发旧输入、不清除后续草稿；后续队列暂停，用户检查已有修改后发送新的继续指令。重新发送沿既有 inspect/resume 接回同一原生 Session。正常 interrupt 只针对单个 session/turn；当前共享 Codex app-server 的强杀会影响同一执行器的其他会话，本接口不将其包装为单会话重启。

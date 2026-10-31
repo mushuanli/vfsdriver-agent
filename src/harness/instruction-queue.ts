@@ -1,3 +1,4 @@
+import {validateExecutionRecovery} from './execution-recovery';
 import {FSError} from '@itookit/vfs-core';
 import {sha256} from '@itookit/vfs-sync';
 import {readStoredAttachments, validateAttachments, prepareTurnInput} from './attachments';
@@ -9,6 +10,7 @@ import {COMMAND_ID_LIMIT} from './command-output';
 import type {HarnessObservation} from './state';
 
 export interface HarnessInstruction {
+    execution?: import('./contracts').HarnessExecutionRecovery;
     id: string; attemptId?: string; text: string; attachments: HarnessAttachment[]; selection?: HarnessModelSelection;
     commandKind?: 'prompt' | 'action';
     commandId?: string; commandRevision?: string;
@@ -16,15 +18,22 @@ export interface HarnessInstruction {
     terminal?: {turnId: string; result: 'completed' | 'failed' | 'cancelled'; observedAt: number};
     createdAt: number; dispatchedAt?: number; acceptedAt?: number; state: 'pending' | 'dispatching' | 'failed' | 'uncertain'; error?: string;
 }
+export interface HarnessAbandonedInstruction {
+    id: string; attemptId?: string; turnId: string; recoveredAt: number; outcome: 'unknown';
+    originalExecution?: import('./contracts').HarnessExecutionRecovery;
+    evidence: import('./contracts').HarnessExecutionRecovery;
+}
 export interface HarnessInstructionQueue {
+    recoveries?: HarnessAbandonedInstruction[];
     revision: number; paused: boolean; items: HarnessInstruction[];
     receipts: Array<{id: string; input: string; turnId?: string; commandId?: string; createdAt?: number; dispatchedAt?: number; acceptedAt?: number}>;
 }
 export type HarnessQueueEdit = {expectedRevision: number} & (
-    {action: 'pause' | 'resume'} | {action: 'remove' | 'retry'; id: string}
+    {action: 'pause' | 'resume'} | {action: 'remove' | 'retry' | 'recover'; id: string}
     | {action: 'update'; id: string; text: string} | {action: 'reorder' | 'merge'; ids: string[]});
 export type HarnessQueueProjection = Omit<HarnessInstructionQueue, 'items' | 'receipts'> & {
     reason?: string;
+    recovery?: {id: string};
     acceptedIds: string[];
     submissions?: Array<{id: string; turnId?: string; commandId?: string; createdAt?: number; dispatchedAt?: number; acceptedAt?: number}>;
     items: Array<Omit<HarnessInstruction, 'attachments'> & {files: Array<{name: string}>}>;
@@ -65,6 +74,7 @@ export class HarnessInstructionRuntime {
     projection(observation?: HarnessObservation): HarnessQueueProjection {
         const reason = observation && this.reason(observation);
         return {revision: this.record.revision, paused: this.record.paused, ...(reason ? {reason} : {}), acceptedIds: this.record.receipts.map(row => row.id),
+            recoveries: structuredClone(this.record.recoveries),
             submissions: this.record.receipts.map(({id, turnId, commandId, createdAt, dispatchedAt, acceptedAt}) => ({id, turnId, commandId, createdAt, dispatchedAt, acceptedAt})),
             items: this.record.items.map(({attachments, ...item}) => ({...structuredClone(item), files: attachments.map(({name}) => ({name}))}))};
     }
@@ -110,6 +120,21 @@ export class HarnessInstructionRuntime {
             this.log(`edit.${captured.action}`, 'failed', started, 'id' in captured ? captured.id : undefined, error); throw error;
         });
     }
+    recover(edit: Extract<HarnessQueueEdit, {id: string}>, evidence: import('./contracts').HarnessExecutionRecovery): Promise<void> {
+        return this.serialize(async () => {
+            await this.sync();
+            if (edit.action !== 'recover' || validateExecutionRecovery(evidence)?.state !== 'detached') throw fail('Invalid native recovery evidence');
+            const item = this.record.items[0];
+            if (edit.expectedRevision !== this.record.revision || item?.id !== edit.id || item.state !== 'dispatching'
+                || !item.receipt?.turnId || item.commandKind || item.receipt.resultError || item.terminal
+                || this.ports.completion(item.receipt.turnId)) throw fail('Instruction recovery changed; refresh before recovering');
+            const recovery: HarnessAbandonedInstruction = {id: item.id, attemptId: item.attemptId, turnId: item.receipt.turnId,
+                originalExecution: item.execution, recoveredAt: Date.now(), outcome: 'unknown', evidence: structuredClone(evidence)};
+            const recoveries = [...this.record.recoveries ?? [], recovery];
+            if (recoveries.length > 64) throw new FSError('EFBIG', 'Instruction recovery history is full');
+            await this.commit({...this.record, paused: true, recoveries, items: this.record.items.slice(1)}, 'recovery.abandoned', item.id);
+        });
+    }
     private async change(edit: HarnessQueueEdit, binding?: {id?: string; revision?: string}): Promise<void> {
         const started = Date.now();
         await this.sync();
@@ -128,6 +153,7 @@ export class HarnessInstructionRuntime {
     }
     private apply(queue: HarnessInstructionQueue, edit: HarnessQueueEdit): void {
         switch (edit.action) {
+            case 'recover': throw fail('Recovery requires fresh native execution evidence');
             case 'pause': queue.paused = true; return;
             case 'resume':
                 if (queue.items.some(row => row.state === 'uncertain')) throw fail('Resolve uncertain instructions before resuming');
@@ -275,7 +301,7 @@ export class HarnessInstructionRuntime {
         const acceptedAt = item.acceptedAt ?? Date.now();
         await this.commit({...this.record,
             receipts: this.record.receipts.map(row => row.id === item.id ? {...row, turnId, commandId, acceptedAt} : row),
-            items: this.record.items.map(row => row.id === item.id ? {...row,receipt, acceptedAt} : row)}, 'admitted',item.id);
+            items: this.record.items.map(row => row.id === item.id ? {...row,receipt, acceptedAt, execution: row.execution ?? this.ports.snapshot().executionRecovery} : row)}, 'admitted',item.id);
     }
     private async markUnknown(item: HarnessInstruction): Promise<void> {
         if (item.state === 'uncertain') return;
@@ -334,6 +360,7 @@ function validateQueue(record: HarnessInstructionQueue): void {
         throw new FSError('EINVAL', 'Invalid native instruction queue');
     if (!Array.isArray(record.items) || record.items.length > 100 || !Array.isArray(record.receipts) || record.receipts.length > 256)
         throw new FSError('EINVAL', 'Invalid native instruction queue capacity');
+    validateRecoveries(record.recoveries);
     validateQueueIdentities(record);
     record.receipts.forEach(validateInstructionReceipt);
 }
@@ -343,6 +370,7 @@ function validateQueueIdentities(record: HarnessInstructionQueue): void {
         throw new FSError('EINVAL', 'Invalid native instruction queue identities');
 }
 function validateInstruction(item: HarnessInstruction): void {
+    validateExecutionRecovery(item.execution);
     if (!item || !validId(item.id) || !hasInstructionInput(item) || !Number.isFinite(item.createdAt)
         || !['pending', 'dispatching', 'failed', 'uncertain'].includes(item.state)) throw new FSError('EINVAL', 'Invalid native instruction');
     validateInstructionOptions(item);
@@ -387,4 +415,17 @@ function validReceiptStatus(receipt: InstructionReceipt): boolean {
 }
 function validResultError(value: InstructionReceipt['resultError']): boolean {
     return value === undefined || !!value && typeof value.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(value.code);
+}
+
+function validateRecoveries(rows: HarnessAbandonedInstruction[] | undefined): void {
+    if (rows === undefined) return;
+    if (!Array.isArray(rows) || rows.length > 64 || new Set(rows.map(row => row?.id)).size !== rows.length)
+        throw new FSError('EINVAL', 'Invalid instruction recovery history');
+    for (const row of rows) {
+        validateExecutionRecovery(row?.originalExecution);
+        if (!row || !validId(row.id) || row.attemptId !== undefined && !validId(row.attemptId)
+            || typeof row.turnId !== 'string' || !row.turnId || row.turnId.length > 1024 || row.outcome !== 'unknown'
+            || !Number.isSafeInteger(row.recoveredAt) || row.recoveredAt <= 0
+            || validateExecutionRecovery(row.evidence)?.state !== 'detached') throw new FSError('EINVAL', 'Invalid instruction recovery record');
+    }
 }

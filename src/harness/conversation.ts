@@ -1,3 +1,5 @@
+import {detachedExecution} from './execution-recovery';
+import {HarnessActivityTracker} from './activity';
 import {recoverHistoryCompletions} from './history-completion';
 import {validateModels, validateModelSelection, validateAvailableSelection} from './models';
 import {HarnessControlLedger, type HarnessInterruptRequest} from './control-ledger';
@@ -25,6 +27,9 @@ export type {HarnessConversationSnapshot} from './conversation-snapshot';
 
 /** One native conversation; closing a viewer never interrupts its remote turn. */
 export class HarnessConversation implements HarnessConversationPort {
+    private readonly activity = new HarnessActivityTracker();
+    private historyRevision?: string;
+    private contentSinceInspect = false;
     private readonly queries: HarnessCommandQueries;
     private readonly instructions: HarnessInstructionRuntime;
     private readonly controls: HarnessControlLedger;
@@ -45,6 +50,7 @@ export class HarnessConversation implements HarnessConversationPort {
     async editInstructionQueue(edit: HarnessQueueEdit) {
         await this.restore();
         if (!this.writable || this.lifetime.signal.aborted) throw new FSError('EACCES', 'Instruction queue is read only');
+        if (edit.action === 'recover') return this.recoverInstruction(structuredClone(edit));
         let binding: HarnessSlashCommand | undefined;
         if (edit.action === 'update') {
             binding = await this.queuedCommand(edit.text);
@@ -53,6 +59,45 @@ export class HarnessConversation implements HarnessConversationPort {
         }
         await this.instructions.edit(edit,binding);
         return this.snapshot();
+    }
+    private async recoverInstruction(edit: Extract<HarnessQueueEdit, {id: string}>) {
+        this.requireInstructionRecovery(edit);
+        const started = Date.now(), sessionId = this.session?.id;
+        return this.mutate(async () => {
+            if (!sessionId) throw new FSError('EINVAL', 'Recovery requires an existing session');
+            await this.read();
+            await this.inspectRecoverySession(sessionId);
+            const head = this.instructions.record.items[0];
+            if (head?.id === edit.id && head.receipt?.turnId && this.turnResults.has(head.receipt.turnId)) {
+                await this.instructions.pump(); return;
+            }
+            const evidence = detachedExecution(this.session);
+            if (!evidence) throw Object.assign(new FSError('EBUSY', 'Native execution is running, locked, or unconfirmed; stop it and retry recovery'), {remoteCode: 'HARNESS_RECOVERY_NOT_DETACHED'});
+            await this.instructions.recover(edit, evidence);
+            console.info('[Harness] Execution recovery', {operation: 'turn.recovery', operationId: edit.id, sessionId,
+                stage: 'abandon_wait', result: 'success', code: 'HARNESS_EXECUTION_RESULT_UNKNOWN', durationMs: Date.now() - started});
+        }).catch(error => {
+            const failure = this.errors.record('recovery', error);
+            console.warn('[Harness] Execution recovery', {operation: 'turn.recovery', operationId: edit.id, sessionId,
+                stage: 'abandon_wait', result: 'failure', code: failure.code, durationMs: Date.now() - started});
+            throw error;
+        });
+    }
+    private requireInstructionRecovery(edit: Extract<HarnessQueueEdit, {id: string}>): void {
+        if (!this.profile.capabilities.executionRecovery || !this.client.inspect)
+            throw new FSError('ECAPABILITY', 'Execution recovery requires an updated node');
+        if (this.busy || this.pending || this.controls.blocksDispatch || this.responses.length
+            || this.commandResults.some(row => row.status === 'running' || row.resultError))
+            throw new FSError('EBUSY', 'Resolve pending submissions and controls before recovery');
+        if (edit.expectedRevision !== this.instructions.record.revision || this.instructions.record.items[0]?.id !== edit.id)
+            throw new FSError('ECONFLICT', 'Instruction queue changed; refresh before recovering');
+    }
+    private async inspectRecoverySession(sessionId: string): Promise<void> {
+        const observed = await this.client.inspect!(this.profile.id, sessionId, this.options());
+        this.lifetime.signal.throwIfAborted();
+        if (observed.session.id !== sessionId) throw new FSError('EIO', 'Recovery session identity changed');
+        this.session = observed.session;
+        if (this.session.lastTurnId) this.recordTurnResult(this.session.lastTurnId, this.session.lastTurnResult);
     }
     private async queuedCommand(text: string) {
         if (!this.profile.capabilities.slashCommands || !text.trimStart().startsWith('/')) return;
@@ -223,16 +268,20 @@ export class HarnessConversation implements HarnessConversationPort {
     }
     private options(): OperationOptions { return {signal: this.lifetime.signal, timeoutMs: 30_000}; }
     snapshot(): HarnessConversationSnapshot {
-        const observation = harnessObservation(this.session, this.requests, {observedAt: this.observedAt, source: this.source,
+        const observation = harnessObservation(this.session, this.requests, {historyRevision: this.historyRevision, activity: this.activity.snapshot(this.session?.activeTurnId), observedAt: this.observedAt, source: this.source,
             connection: this.disconnected || this.nativeDisconnected ? 'offline' : 'online',
             refreshError: this.refreshError, stale: !!this.refreshError || Date.now() - this.observedAt > 30_000,
             receiptUnknown: !!this.pending || !!this.responses.length || this.controls.pending});
         if (this.commandResults.some(row => row.status === 'running') && observation.execution === 'idle') observation.execution = 'running';
         const active = ['running', 'waiting-approval', 'waiting-input'].includes(observation.execution);
         const actions = this.actions(observation);
-        const queue = this.instructions.projection(observation);
+        const queue = this.instructions.projection(observation), head = this.instructions.record.items[0];
+        if (this.writable && this.profile.capabilities.executionRecovery && head?.state === 'dispatching'
+            && head.receipt?.turnId && !head.commandKind && !head.terminal
+            && !this.turnResults.has(head.receipt.turnId) && Date.now() - (head.acceptedAt ?? head.createdAt) >= 60_000)
+            queue.recovery = {id: head.id};
         observation.canInterrupt = actions.canInterrupt; observation.canRespond = actions.canRespond;
-        return {resultError: commandResultIssue(this.commandResults), ...(this.profile.capabilities.models ? {supportsModels: true} : {}), ...(this.profile.capabilities.slashCommands ? {supportsSlashCommands: true} : {}), ...(this.nativeCommands.length ? {slashCommands: this.availableCommands()} : {}), usage: this.session?.usage, usageUnavailable: this.session?.usageUnavailable, observation, submission: this.submission ? {...this.submission} : undefined, submittedTurnId: this.submittedTurnId, draft: this.draft, draftAttachments: structuredClone(this.draftAttachments), sessionId: this.navigationSessionId ?? this.session?.id, title: this.session?.title.trim() || this.profile.kind,
+        return {executionRecovery: this.session?.executionRecovery, resultError: commandResultIssue(this.commandResults), ...(this.profile.capabilities.models ? {supportsModels: true} : {}), ...(this.profile.capabilities.slashCommands ? {supportsSlashCommands: true} : {}), ...(this.nativeCommands.length ? {slashCommands: this.availableCommands()} : {}), usage: this.session?.usage, usageUnavailable: this.session?.usageUnavailable, observation, submission: this.submission ? {...this.submission} : undefined, submittedTurnId: this.submittedTurnId, draft: this.draft, draftAttachments: structuredClone(this.draftAttachments), sessionId: this.navigationSessionId ?? this.session?.id, title: this.session?.title.trim() || this.profile.kind,
             attachments: this.writable ? this.profile.capabilities.attachments : undefined,
             deletedSessionIds: this.deletedSessionIds.slice(),
             archived: !!this.session?.archived,
@@ -486,6 +535,7 @@ export class HarnessConversation implements HarnessConversationPort {
             if (this.session.lastTurnId) this.recordTurnResult(this.session.lastTurnId, this.session.lastTurnResult);
             if (history.eventCursor) this.cursor = {...history.eventCursor};
             this.observedAt = Date.now(); this.source = 'history'; this.gap = false;
+            this.historyRevision = history.session.historyRevision;
             if (!this.expandedHistory) { this.earlier = history.nextCursor ?? undefined; this.historyCursors.clear(); }
             for (const message of this.messages) if (message.status === 'completed') this.completedItems.add(message.id);
             while (this.completedItems.size > 1000) this.completedItems.delete(this.completedItems.values().next().value!);
@@ -576,6 +626,7 @@ export class HarnessConversation implements HarnessConversationPort {
             for (const recovered of ['events', 'projection', 'inspect', 'history', 'controls']) this.errors.clear(recovered);
         } catch (error) {
             if (this.lifetime.signal.aborted) throw error;
+            if (stage === 'events') await this.recoverAfterEventFailure();
             this.disconnected = connectionLost(error);
             this.refreshError = this.errors.record(stage, error);
         }
@@ -585,6 +636,24 @@ export class HarnessConversation implements HarnessConversationPort {
         }
         return this.snapshot();
     }
+    private async recoverAfterEventFailure(): Promise<void> {
+        const head = this.instructions.record.items[0], turnId = head?.receipt?.turnId;
+        if (!this.session || this.busy || Date.now() - this.terminalReadAt < 15_000) return;
+        const started = Date.now(); this.terminalReadAt = started;
+        try {
+            // Cached active state may predate a node restart; only native history can resolve it.
+            await this.read();
+            console.info('[Harness] Turn recovery history', {operation: 'turn.history.reconcile', operationId: turnId ?? this.session.id,
+                sessionId: this.session.id, stage: 'events_fallback', result: !turnId ? 'refreshed' : this.turnResults.has(turnId) ? 'confirmed' : 'unconfirmed',
+                durationMs: Date.now() - started});
+        } catch (error) {
+            if (this.lifetime.signal.aborted) throw error;
+            const failure = this.errors.record('history', error);
+            console.warn('[Harness] Turn recovery history', {operation: 'turn.history.reconcile', operationId: turnId,
+                sessionId: this.session.id, stage: 'events_fallback', result: 'failure', code: failure.code,
+                durationMs: Date.now() - started});
+        }
+    }
     private async inspect(page: HarnessEvents): Promise<void> {
         if (!this.session || !this.client.inspect || Date.now() - this.inspectedAt < 15_000) return;
         this.session = (await this.client.inspect(this.profile.id, this.session.id, this.options())).session;
@@ -592,12 +661,24 @@ export class HarnessConversation implements HarnessConversationPort {
         if (this.session.lastTurnId) this.recordTurnResult(this.session.lastTurnId, this.session.lastTurnResult);
         this.requests = page.requests.filter(r => r.params?.threadId === this.session?.id).flatMap(nativeRequest);
         this.nativeDisconnected = false;
+        const revision = this.session.historyRevision, quiet = !this.contentSinceInspect;
+        this.contentSinceInspect = false;
+        if (revision && revision !== this.historyRevision && (this.session.owned !== true || quiet && this.session.status !== 'active')) {
+            const started = Date.now(); await this.read();
+            try {console.info('[Harness] History revision reconciled', {operation: 'harness.history.reconcile', operationId: this.session.id,
+                sessionId: this.session.id, stage: 'source_revision', result: 'success', historyRevision: this.historyRevision,
+                durationMs: Date.now() - started});} catch { /* Diagnostics cannot change history or execution. */ }
+        }
     }
     private async recoverQueuedTerminal(): Promise<void> {
         const head = this.instructions.record.items[0], turnId = head?.receipt?.turnId;
-        if (!turnId || head.terminal || this.turnResults.has(turnId) || this.session?.status !== 'idle'
-            || this.session.activeTurnId || Date.now() - this.terminalReadAt < 15_000) return;
+        if (!turnId || head.terminal || this.turnResults.has(turnId) || this.session?.status !== 'idle' && !detachedExecution(this.session)
+            || this.session?.activeTurnId || Date.now() - this.terminalReadAt < 15_000) return;
         this.terminalReadAt = Date.now(); await this.read();
+        try {console.info('[Harness] Turn recovery history', {operation: 'turn.history.reconcile', operationId: turnId,
+            sessionId: this.session?.id, stage: 'idle_history', result: this.turnResults.has(turnId) ? 'confirmed' : 'unconfirmed',
+            code: this.turnResults.has(turnId) ? undefined : detachedExecution(this.session) ? 'HARNESS_EXECUTION_RESULT_UNKNOWN' : 'HARNESS_TERMINAL_UNCONFIRMED',
+            durationMs: Date.now() - this.terminalReadAt});} catch { /* Diagnostics cannot settle an admitted turn. */ }
     }
     private consume(page: HarnessEvents) {
         for (const {message, timestamp} of page.events) {
@@ -609,10 +690,12 @@ export class HarnessConversation implements HarnessConversationPort {
         if (this.requests.length) { this.observedAt = Date.now(); this.source = 'events'; }
     }
     private consumeEvent(method: string, params: Record<string, unknown>, at?: number) {
+        if (method.startsWith('item/')) this.contentSinceInspect = true;
         if (method === 'harness/command/updated' && params.threadId === this.session?.id) this.commandUpdated(params);
         if (method === 'harness/commands/updated') this.nativeCommands = validateCommands({commands: params.commands});
         const prior = this.session!;
         this.session = applyHarnessStatus(prior, {method, params});
+        this.activity.observe(method, params, at, this.session.activeTurnId);
         if (this.session !== prior) {
             this.observedAt = Date.now(); this.source = 'events'; this.gap = false;
             if (['thread/status/changed', 'turn/started', 'turn/completed'].includes(method)) this.nativeDisconnected = false;
