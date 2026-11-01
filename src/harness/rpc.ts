@@ -13,7 +13,7 @@ export function createHarnessRpc(endpoint: string, fetch: typeof globalThis.fetc
     const base = new URL(endpoint.endsWith('/') ? endpoint : endpoint + '/');
     if (base.pathname.endsWith('/mcp/')) base.pathname = base.pathname.slice(0,-4);
     const events = sharedEvents ?? new NodeEventHub(new URL('v1/events',base),fetch);
-    const client = new Client({ name: 'itookit-nestos-node-driver', version: '0.4.0' }, {
+    const client = new Client({ name: 'itookit-cells-driver', version: '0.4.0' }, {
         supportedProtocolVersions: ['2026-07-28'], versionNegotiation: { mode: { pin: '2026-07-28' } },
         inputRequired: { autoFulfill: false },
     });
@@ -38,7 +38,7 @@ export function createHarnessRpc(endpoint: string, fetch: typeof globalThis.fetc
             void connect().then(() => {
                 if (stopped || lifetime.signal.aborted) return;
                 const meta = client.getDiscoverResult()?._meta;
-                const descriptor = meta?.['itookit/nestos-node'] as {events?: unknown} | undefined;
+                const descriptor = meta?.['itookit/cells'] as {events?: unknown} | undefined;
                 requireEventCapability(descriptor?.events);
                 stop = events.subscribe(plugin,args,listener);
             }).catch(error => { if (!stopped) listener.error(error); });

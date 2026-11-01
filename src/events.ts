@@ -71,7 +71,7 @@ export class NodeEventHub {
             if (revision !== this.revision || this.closed) return;
             if (![...this.channels.values()].some(channel => !channel.terminal)) return;
             const failure = error as {code?: string; status?: number};
-            console.warn('[nestos-node] events.failed', {operationId,stage:'stream',code:failure.code ?? 'EVENT_NETWORK',
+            console.warn('[cells] events.failed', {operationId,stage:'stream',code:failure.code ?? 'EVENT_NETWORK',
                 status:failure.status,elapsedMs:Date.now()-started,subscriptions:this.channels.size});
             for (const row of this.channels.values()) if (!row.terminal) {
                 row.failure = error; for (const listener of [...row.listeners]) this.notifyError(row, listener, error);
@@ -113,7 +113,7 @@ export class NodeEventHub {
         catch { this.observerFailed(channel, 'error', started); }
     }
     private observerFailed(channel: Channel, stage: string, started: number): void {
-        console.warn('[nestos-node] events.observer.failed', {operation: 'node.events.observe', operationId: channel.id, plugin: channel.plugin,
+        console.warn('[cells] events.observer.failed', {operation: 'node.events.observe', operationId: channel.id, plugin: channel.plugin,
             stage, outcome: 'failure', code: 'EVENT_OBSERVER_FAILED', durationMs: Date.now() - started});
     }
     private retry(channel: Channel): void {
@@ -130,5 +130,5 @@ export class NodeEventHub {
 export function requireEventCapability(value: unknown): void {
     const capability = value as {version?: number;transport?: string;endpoint?: string};
     if (capability?.version !== 1 || capability.transport !== 'sse' || capability.endpoint !== '/v1/events')
-        throw new FSError('ECAPABILITY','Node event subscriptions require an upgraded nestos-node','protocol');
+        throw new FSError('ECAPABILITY','Node event subscriptions require an upgraded cells','protocol');
 }

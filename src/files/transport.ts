@@ -125,8 +125,8 @@ export class HttpTransport {
     private async headers(input?: HeadersInit): Promise<Headers> {
         const headers = new Headers(input);
         if (this.config.authorization) {
-            headers.set('x-pi-agent-principal', this.config.authorization.principalId);
-            headers.set('x-pi-agent-grant-revision', this.config.authorization.revision);
+            headers.set('x-cells-principal', this.config.authorization.principalId);
+            headers.set('x-cells-grant-revision', this.config.authorization.revision);
         }
         if (this.config.anonymous) headers.delete('Authorization');
         else headers.set('Authorization', this.authorization(await this.config.credential()));

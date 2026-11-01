@@ -11,10 +11,10 @@ import { HttpProcessSession, discoverServer, openHttpFileSource } from '../../sr
 
 // Hosts can supply the independently maintained server for protocol verification.
 // Inside itookit, retain automatic discovery of its server submodule.
-const configuredManifest = process.env.NESTOS_NODE_MANIFEST;
-const manifest = resolve(configuredManifest ?? '../../tools/nestos-node/Cargo.toml');
+const configuredManifest = process.env.CELLS_MANIFEST;
+const manifest = resolve(configuredManifest ?? '../../tools/cells/Cargo.toml');
 if (configuredManifest && (process.platform !== 'linux' || !existsSync(manifest))) {
-    throw new Error('NESTOS_NODE_MANIFEST requires Linux and an existing Cargo.toml');
+    throw new Error('CELLS_MANIFEST requires Linux and an existing Cargo.toml');
 }
 
 it.skipIf(process.platform !== 'linux' || !existsSync(manifest))('reads, conditionally saves and cancels against the real Rust server', async () => {
@@ -26,7 +26,7 @@ it.skipIf(process.platform !== 'linux' || !existsSync(manifest))('reads, conditi
     // Single-user config: top-level credentials plus a flat export list.
     await writeFile(config, `listen = "127.0.0.1:0"
 log_level = "debug"
-${process.env.NESTOS_NODE_PROCESS_TEST === '1' ? '' : 'execution = false'}
+${process.env.CELLS_PROCESS_TEST === '1' ? '' : 'execution = false'}
 username = "test"
 password_env = "TEST_FS_PASSWORD"
 
@@ -63,7 +63,7 @@ access = "rw"
         await owner.fs.driver.delete(['/moved.txt']);
         const controller = new AbortController(); controller.abort();
         await expect(owner.fs.driver.readContent('/note.txt', { signal: controller.signal })).rejects.toMatchObject({ code: 'ECANCELLED' });
-        if (process.env.NESTOS_NODE_PROCESS_TEST === '1') {
+        if (process.env.CELLS_PROCESS_TEST === '1') {
             const transport = new HttpTransport({ endpoint, username: 'test', credential: () => password });
             const caps = await discoverServer(transport);
             expect(caps.process.exec).toBe(true);
@@ -89,7 +89,7 @@ access = "rw"
         expect(events.filter(event => event.event === 'http.failed').every(event => event.fields.status >= 400)).toBe(true);
         expect(output).not.toContain(password);
         expect(output).not.toContain('pwd; echo shell');
-        if (process.env.NESTOS_NODE_PROCESS_TEST === '1') expect(events.some(event => event.event === 'process.finished')).toBe(true);
+        if (process.env.CELLS_PROCESS_TEST === '1') expect(events.some(event => event.event === 'process.finished')).toBe(true);
     } finally {
         await owner?.dispose(); child.kill('SIGINT'); await exited; await rm(directory, { recursive: true, force: true });
     }

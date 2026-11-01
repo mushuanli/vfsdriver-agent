@@ -14,12 +14,12 @@ import { HarnessStatusObserver, type HarnessStatusPort } from './harness/status-
 import { NodeEventHub } from './events';
 
 type Connection = Omit<RemoteConnection, 'alias'>;
-export interface NestOSNodeDescriptor { authorization?: RemoteAuthorization; version: 1; httpEndpoint: string; serverId: string | null; fileProtocol: 'fs-agent-http-v1'; harness: boolean; projects?: boolean; sync?: boolean; projectProtocol?: string; directorySync?: boolean; directorySyncVersion?: number; fileSearch?: boolean; directoryEvents?: boolean; events?: {version:1;transport:'sse';endpoint:'/v1/events'}; }
-export interface NestOSNodeDriver extends HttpSourceProvider {
+export interface CellsDescriptor { authorization?: RemoteAuthorization; version: 1; httpEndpoint: string; serverId: string | null; fileProtocol: 'fs-agent-http-v1'; harness: boolean; projects?: boolean; sync?: boolean; projectProtocol?: string; directorySync?: boolean; directorySyncVersion?: number; fileSearch?: boolean; directoryEvents?: boolean; events?: {version:1;transport:'sse';endpoint:'/v1/events'}; }
+export interface CellsDriver extends HttpSourceProvider {
     observeHarness(client: HarnessClient, writable?: boolean, options?: {watchFiles?: boolean}): HarnessStatusPort;
     open(connection: RemoteConnection & {serverProjectId?: string; serverProjectRevision?: number; access?: 'ro' | 'rw'}, options?: import('@itookit/vfs-core').OperationOptions): ReturnType<HttpSourceProvider['open']>;
     resolveCredential(reference: string): Promise<string>;
-    discover(connection: Connection, options?: import('@itookit/vfs-core').OperationOptions): Promise<NestOSNodeDescriptor>;
+    discover(connection: Connection, options?: import('@itookit/vfs-core').OperationOptions): Promise<CellsDescriptor>;
     conversation(client: HarnessClient, profile: HarnessProfile, workspaceId: string, sessionId?: string, writable?: boolean, journal?: HarnessConversationJournal): HarnessConversationPort;
     harness(connection: Connection): HarnessClient;
     projects(connection: Connection): ProjectClient;
@@ -28,7 +28,7 @@ export interface NestOSNodeDriver extends HttpSourceProvider {
 }
 
 /** A single credential owner; file, sync and harness clients retain independent lifetimes. */
-export function createNestOSNodeDriver(resolveCredential?: (reference: string) => string | Promise<string>, fetch = globalThis.fetch): NestOSNodeDriver {
+export function createCellsDriver(resolveCredential?: (reference: string) => string | Promise<string>, fetch = globalThis.fetch): CellsDriver {
     const secrets = new Map<string, string>();
     const eventHubs = new Map<string, NodeEventHub>();
     const eventHub = (connection: Connection): NodeEventHub => {
@@ -53,14 +53,14 @@ export function createNestOSNodeDriver(resolveCredential?: (reference: string) =
         resolveCredential: credential,
         observeHarness: (client: HarnessClient, writable = true, options?: {watchFiles?: boolean}) => new HarnessStatusObserver(client, Date.now, writable, options?.watchFiles ?? true),
         conversation: (client: HarnessClient, profile: HarnessProfile, workspaceId: string, sessionId?: string, writable?: boolean, journal?: HarnessConversationJournal) => new HarnessConversation(client, profile, workspaceId, sessionId, writable, journal),
-        async discover(connection: Connection, options?: import('@itookit/vfs-core').OperationOptions): Promise<NestOSNodeDescriptor> {
+        async discover(connection: Connection, options?: import('@itookit/vfs-core').OperationOptions): Promise<CellsDescriptor> {
             const rpc = createHarnessRpc(connection.endpoint, authenticatedFetch(connection, credential, fetch), true);
             try {
                 const value = await discoverCapabilities(rpc,options);
                 if (value?.version !== 1 || value.fileProtocol !== 'fs-agent-http-v1' || typeof value.harness !== 'boolean' || typeof value.httpEndpoint !== 'string'
-                    || !(value.serverId === null || typeof value.serverId === 'string')) throw new FSError('ECAPABILITY', 'Invalid nestos-node discovery');
+                    || !(value.serverId === null || typeof value.serverId === 'string')) throw new FSError('ECAPABILITY', 'Invalid cells discovery');
                 const mcp = new URL(connection.endpoint), http = new URL(value.httpEndpoint, mcp);
-                if (http.origin !== mcp.origin || http.username || http.password || http.search || http.hash) throw new FSError('EACCES', 'Invalid nestos-node HTTP endpoint');
+                if (http.origin !== mcp.origin || http.username || http.password || http.search || http.hash) throw new FSError('EACCES', 'Invalid cells HTTP endpoint');
                 const authorization = validateAuthorization(value.authorization);
                 if (authorization && authorization.anonymous !== !!connection.anonymous)
                     throw new FSError('EACCES', 'Remote authentication mode changed');
@@ -121,24 +121,16 @@ export function createNestOSNodeDriver(resolveCredential?: (reference: string) =
             results.push(...await Promise.allSettled([...projectFiles].map(owner => owner.dispose())));
             results.push(...await Promise.allSettled([disposeFiles()]));
             const errors = results.flatMap(r => r.status === 'rejected' ? [r.reason] : []);
-            if (errors.length) throw new AggregateError(errors, 'nestos-node resources failed to close');
+            if (errors.length) throw new AggregateError(errors, 'cells resources failed to close');
             for (const hub of eventHubs.values()) hub.close(); eventHubs.clear();
             secrets.clear();
         },
     });
 }
-async function discoverCapabilities(rpc: HarnessRpc,options?: import('@itookit/vfs-core').OperationOptions): Promise<NestOSNodeDescriptor> {
+async function discoverCapabilities(rpc: HarnessRpc,options?: import('@itookit/vfs-core').OperationOptions): Promise<CellsDescriptor> {
     const metadata = await rpc.metadata?.(options);
-    for (const key of ['itookit/nestos-node', 'itookit/mindos-node', 'itookit/pi-agent', 'itookit/fs-agent'])
-        if (Object.hasOwn(metadata ?? {},key)) return metadata![key] as NestOSNodeDescriptor;
-    for (const name of ['nestos_node_capabilities', 'mindos_node_capabilities', 'piagent_capabilities', 'fsagent_capabilities']) {
-        try { return await rpc.call(name,{},options) as NestOSNodeDescriptor; }
-        catch (error) {
-            const failure=error as {remoteCode?: string; code?: string | number};
-            if (name === 'fsagent_capabilities' || failure.remoteCode!=='ECAPABILITY' && failure.code!==-32601) throw error;
-        }
-    }
-    throw new FSError('ECAPABILITY', 'Node capability discovery unavailable');
+    if (Object.hasOwn(metadata ?? {}, 'itookit/cells')) return metadata!['itookit/cells'] as CellsDescriptor;
+    return await rpc.call('cells_capabilities', {}, options) as CellsDescriptor;
 }
 
 function authenticatedFetch(connection: Connection, credential: (ref: string) => Promise<string>, fetch: typeof globalThis.fetch): typeof globalThis.fetch {
@@ -147,7 +139,7 @@ function authenticatedFetch(connection: Connection, credential: (ref: string) =>
         throw new FSError('EINVAL', 'Invalid agent endpoint');
     return async (input, init) => {
         const headers = new Headers(init?.headers);
-        if (connection.authorization) { headers.set('x-pi-agent-principal',connection.authorization.principalId); headers.set('x-pi-agent-grant-revision',connection.authorization.revision); }
+        if (connection.authorization) { headers.set('x-cells-principal',connection.authorization.principalId); headers.set('x-cells-grant-revision',connection.authorization.revision); }
         if (connection.anonymous) { headers.delete('Authorization'); return boundedResponse(await fetch(input, {...init, headers, redirect:'error', credentials:'omit', cache:'no-store'})); }
         const secret = await credential(connection.credentialRef);
         const bytes = new TextEncoder().encode(`${connection.username}:${secret}`);

@@ -9,11 +9,11 @@ importers:
   .:
     dependencies:
       '@itookit/vfs-core':
-        specifier: 5.3.2
-        version: 5.3.2
+        specifier: 5.3.4
+        version: 5.3.4
       '@itookit/vfs-sync':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@modelcontextprotocol/client':
         specifier: 2.0.0
         version: 2.0.0
@@ -345,11 +345,11 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@itookit/vfs-core@5.3.2':
-    resolution: {integrity: sha512-TR3VCHuYfgEQiixYDb5MhuFDYnIH2cBeYUEe7ZJtUhtzwXfwzgVMOvVN4hS3YMAwggqZ7A46gLkEvDD69Mlu0Q==}
+  '@itookit/vfs-core@5.3.4':
+    resolution: {integrity: sha512-BotXlhAwDQwaFYhmfdg2eOhFZ4xfVApR8rJvprAj5eXQhfLpo1m/ZSRhD+lrTqgqeGU06xGJtMpBTiNL7prmzA==}
 
-  '@itookit/vfs-sync@0.1.0':
-    resolution: {integrity: sha512-nWpnOPouSnhMs60BVy+mB70GGxEld5jgRGuxZQ5Jxj1kkQdrZsNd/+/s+kzSD8BCJLaxzp5J/LpNd5OwSJFZCQ==}
+  '@itookit/vfs-sync@0.1.1':
+    resolution: {integrity: sha512-GMCXB7O6Ypor55BbI3COkyisnuWnsdhRRR4AdNpKTFTMdzJiS004QHtG50TDTflc3wsdhbLA9G2vivRN3ghgvg==}
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -1115,12 +1115,12 @@ snapshots:
   '@esbuild/win32-x64@0.28.2':
     optional: true
 
-  '@itookit/vfs-core@5.3.2':
+  '@itookit/vfs-core@5.3.4':
     dependencies:
       ignore: 5.3.2
       yaml: 2.9.1
 
-  '@itookit/vfs-sync@0.1.0': {}
+  '@itookit/vfs-sync@0.1.1': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:

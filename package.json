@@ -1,7 +1,7 @@
 {
-  "name": "@itookit/nestos-node-driver",
+  "name": "@itookit/cells-driver",
   "version": "0.4.3",
-  "description": "Platform-independent client for nestos-node: controlled files, projects, sync, processes and native AI harness sessions.",
+  "description": "Platform-independent driver for cells, the intelligent nodes integrating information and agents into NestOS.",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -86,7 +86,7 @@
   "keywords": [
     "itookit",
     "nestos",
-    "nestos-node",
+    "cells",
     "mcp",
     "filesystem",
     "sync",
@@ -94,12 +94,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mushuanli/nestos-node-driver.git"
+    "url": "git+https://github.com/mushuanli/cells-driver.git"
   },
   "bugs": {
-    "url": "https://github.com/mushuanli/nestos-node-driver/issues"
+    "url": "https://github.com/mushuanli/cells-driver/issues"
   },
-  "homepage": "https://github.com/mushuanli/nestos-node-driver#readme",
+  "homepage": "https://github.com/mushuanli/cells-driver#readme",
   "packageManager": "pnpm@10.20.0",
   "engines": {
     "node": ">=20"

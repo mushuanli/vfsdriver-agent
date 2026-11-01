@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { createFile } from '@itookit/vfs-core';
-import { createNestOSNodeDriver } from '../src/provider';
+import { createCellsDriver } from '../src/provider';
 
 it('opens unscoped exports through the injected transport and shares updated credentials', async () => {
     const auth: Array<string | null> = [];
@@ -16,7 +16,7 @@ it('opens unscoped exports through the injected transport and shares updated cre
         if (url.pathname === '/v1/sync/capabilities') return Response.json({historyEpoch: 'epoch'});
         throw new Error(`Unexpected request: ${url.pathname}`);
     });
-    const driver = createNestOSNodeDriver(undefined, fetch);
+    const driver = createCellsDriver(undefined, fetch);
     const connection = {endpoint: 'https://pi.test', alias: 'docs', credentialRef: 'key'};
     driver.setCredential('key', 'first');
     const owner = await driver.open(connection), sync = driver.transport(connection);

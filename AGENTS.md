@@ -1,15 +1,15 @@
-# @itookit/nestos-node-driver
+# @itookit/cells-driver
 
 精确 turn 的已确认终态保存在原队列项 terminal 内，经既有 journal.save 持久化，重启可复用；不同 turn、未知提交与会话空闲本身不能解除队首屏障。inspect 的 lastTurnResult 必须与 lastTurnId 成对使用；空闲且队首缺终态时最多每 15 秒核对一次原生历史，无 inspect 能力也能核对。projection.reason 只解释等待条件，不改变执行准入。
 事件读取失败时，已接纳且缺终态的队首仍独立核对历史，复用 15 秒节流，不受缓存 active 阻止；保留事件故障及发送屏障，不自动重放。回归见 tests/terminal-observation.test.ts。
 
-平台无关的 nestos-node 接入层。文件与进程实现位于 src/files，同步 HTTP 协议与 harness MCP 协议归本包。不得依赖旧 vfsdriver-agent 包。
+平台无关的 cells 接入层。文件与进程实现位于 src/files，同步 HTTP 协议与 harness MCP 协议归本包。不得依赖旧 vfsdriver-agent 包。
 不得依赖 app-core、UI 或宿主 API。连接配置与目录授权策略归 app-core；凭据解析与 fetch 由宿主注入。
 文件、同步与 harness 各自拥有生命周期。关闭控制面板只关闭客户端等待，不把连接断开当作 turn 已停止。
 修改操作携带 epoch 与 requestId；结果未知时查询 receipt，不自动重放。
 可信节点回执明确 not-committed 时，即使 code=EIO 也不能重新分类为 unknown。队列保留原接纳身份、失败状态及暂停；重开不自动派发，用户显式 retry 或 resume 才为失败项创建新的原生 attempt，原 requestId 的拒绝事实保持不变。resume 先拒绝任何 uncertain 项，再原子准备失败项重试及解除暂停；保存失败不派发。
 原生命令由 profile.capabilities.slashCommands 协商，commands 查询会话目录、command 执行并沿用 receipt；不在客户端按 harness 名猜测命令或 RPC。命令与普通 turn 分开，命令可无 turnId；未知操作保存 inputText，核对接纳时只清理匹配草稿，保留后续输入。旧节点不宣称能力时不发新协议请求。
-验证：pnpm --filter @itookit/nestos-node-driver test / typecheck。
+验证：pnpm --filter @itookit/cells-driver test / typecheck。
 
 FileStorageBackend 是文件契约；共享文件来源与独立执行会话分别持有生命周期。批量读的取消按订阅者隔离，最后一个订阅者离开才取消共享请求。
 网络错误不能转换成不存在；响应必须验证，所有读取有容量限制。日志不记录 headers、凭据或正文。

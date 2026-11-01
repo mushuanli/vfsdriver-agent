@@ -29,7 +29,7 @@ it('starts remote processes without randomUUID and logs server-side failure deta
     try {
         await expect(session.nativeShell.exec('bash', ['-c', 'ls'])).rejects.toThrow('spawn denied');
         expect(fetch).toHaveBeenCalledTimes(1);
-        expect(log).toHaveBeenCalledWith('[nestos-node] Process failed', expect.objectContaining({
+        expect(log).toHaveBeenCalledWith('[cells] Process failed', expect.objectContaining({
             cwd: '/workspace', error: 'spawn denied', stderr: 'sandbox start failed', state: 'failed',
         }));
         expect(JSON.stringify(log.mock.calls)).not.toContain('secret');

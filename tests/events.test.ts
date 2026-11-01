@@ -74,7 +74,7 @@ it('parses split UTF-8 CRLF frames and ignores heartbeat comments', async () => 
 it('bounds frames and rejects unsupported nodes without a polling fallback', async () => {
     const body = new ReadableStream<Uint8Array>({start(controller) { controller.enqueue(encoder.encode('data: '+'x'.repeat(8*1024*1024)+'\n\n')); }});
     await expect(readEventStream(body,new AbortController(),() => {})).rejects.toMatchObject({code:'EFBIG'});
-    expect(() => requireEventCapability(undefined)).toThrow('upgraded nestos-node');
+    expect(() => requireEventCapability(undefined)).toThrow('upgraded cells');
     requireEventCapability({version:1,transport:'sse',endpoint:'/v1/events'});
 });
 it('keeps independent local cursors and does not confuse filtered sequence numbers with a gap', async () => {

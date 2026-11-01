@@ -1,16 +1,8 @@
 export type {HarnessTurnSubmissionEvidence} from './harness/contracts';
-export { createNestOSNodeDriver } from './provider';
-/** @deprecated Use createNestOSNodeDriver. */
-export { createNestOSNodeDriver as createNestOSNodeClient } from './provider';
-/** @deprecated Use NestOSNodeDriver. */
-export type { NestOSNodeDriver as NestOSNodeClient } from './provider';
-/** @deprecated Use createNestOSNodeDriver. */
-export { createNestOSNodeDriver as createPiAgentDriver } from './provider';
-/** @deprecated Use NestOSNodeDriver and NestOSNodeDescriptor. */
-export type { NestOSNodeDriver as PiAgentDriver, NestOSNodeDescriptor as PiAgentDescriptor } from './provider';
+export { createCellsDriver } from './provider';
 export type { RemoteAuthorization, RemoteProjectCapabilities } from './authorization';
 export { validateAuthorization } from './authorization';
-export type { NestOSNodeDriver, NestOSNodeDescriptor } from './provider';
+export type { CellsDriver, CellsDescriptor } from './provider';
 export * from './files/index';
 export type { HarnessClient, HarnessMutationOptions, HarnessExecutionRecovery, HarnessProfile, HarnessSession, HarnessPage, HarnessHistory, HarnessHistoryOptions, HarnessEvent, HarnessEvents, HarnessReceipt } from './harness/contracts';
 
@@ -47,8 +39,5 @@ export type {HarnessCommandCatalog, HarnessCommandObservation} from './harness/c
 export type {HarnessCommandOutputRef, HarnessCommandOutputPage, HarnessCommandOutputOptions, HarnessCommandOutputLoadOptions,
     HarnessCommandOutputIssue, HarnessCommandOutput} from './harness/contracts';
 
-/** @deprecated Use the NestOS names; legacy factories keep working. */
-export {createNestOSNodeDriver as createMindOSNodeDriver, createNestOSNodeDriver as createMindOSNodeClient} from "./provider";
-export type {NestOSNodeDriver as MindOSNodeDriver, NestOSNodeDriver as MindOSNodeClient, NestOSNodeDescriptor as MindOSNodeDescriptor} from "./provider";
 
 export type {HarnessMetrics} from './harness/metrics';

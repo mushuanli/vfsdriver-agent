@@ -32,7 +32,7 @@ export class MCPProjectClient implements ProjectClient {
     async search(project: RemoteProject, query: FileSearchQuery, options?: OperationOptions) {
         validateSearchDirectory(query.directory);
         const meta = await this.rpc.metadata?.(options);
-        const capabilities = (meta?.['itookit/nestos-node'] ?? meta?.['itookit/pi-agent'] ?? meta?.['itookit/fs-agent']) as {fileSearch?: boolean; fileSearchVersion?: number; searchKeywords?: boolean} | undefined;
+        const capabilities = meta?.['itookit/cells'] as {fileSearch?: boolean; fileSearchVersion?: number; searchKeywords?: boolean} | undefined;
         if (capabilities?.fileSearch === false) throw new FSError('ECAPABILITY', 'Server file search unavailable');
         if (/[^\S\r\n]/u.test(query.query) && capabilities?.searchKeywords !== true)
             throw new FSError('ECAPABILITY', 'Keyword search requires a newer server');

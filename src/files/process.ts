@@ -41,7 +41,7 @@ export class HttpProcessSession {
             const status = await this.wait(id, started, scope.options);
             if (isTerminal(status)) this.outstanding.delete(id);
             if (status.state !== 'exited' || status.code !== 0 || status.truncated) {
-                console.error('[nestos-node] Process failed', { serverId: this.spec.serverId, epoch: this.spec.epoch,
+                console.error('[cells] Process failed', { serverId: this.spec.serverId, epoch: this.spec.epoch,
                     processId: id, cwd, state: status.state, exitCode: status.code, truncated: status.truncated,
                     error: status.error, stderr: status.stderr.slice(0, 4096) });
             }

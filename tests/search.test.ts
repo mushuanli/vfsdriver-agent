@@ -4,7 +4,7 @@ const project = {id: 'p', name: 'P', alias: 'home', path: 'p', access: 'rw' as c
 const result = {matches: [{path: 'nested/file.txt', summary: 'needle'}], truncated: false, nextCursor: null};
 it('negotiates keyword semantics on the same project connection and preserves the literal query', async () => {
     let searchKeywords = false;
-    const call = vi.fn(async () => result), metadata = vi.fn(async () => ({'itookit/pi-agent': {fileSearchVersion: 2, searchKeywords}}));
+    const call = vi.fn(async () => result), metadata = vi.fn(async () => ({'itookit/cells': {fileSearchVersion: 2, searchKeywords}}));
     const client = new MCPProjectClient({call, metadata, close: vi.fn()});
     await expect(client.search(project, {query: 'Beta alpha', mode: 'content'})).rejects.toMatchObject({code: 'ECAPABILITY'});
     expect(call).not.toHaveBeenCalled();
@@ -25,7 +25,7 @@ it.each(['title', 'content', 'prompt'] as const)('requires native keyword capabi
     expect(call).toHaveBeenLastCalledWith('harness_session_search', {projectId: 'p', revision: 3, profileId: 'alias', query: 'Beta alpha', mode}, undefined);
 });
 it('negotiates scoped/name file search and retains project revision and source-relative paths', async () => {
-    const call = vi.fn(async () => result), metadata = vi.fn(async () => ({'itookit/pi-agent': {fileSearchVersion: 2}}));
+    const call = vi.fn(async () => result), metadata = vi.fn(async () => ({'itookit/cells': {fileSearchVersion: 2}}));
     const client = new MCPProjectClient({call, metadata, close: vi.fn()});
     expect(await client.search(project, {query: 'file', mode: 'name', directory: 'nested'})).toEqual(result);
     expect(call).toHaveBeenCalledExactlyOnceWith('project_search', {projectId: 'p', revision: 3, query: 'file', mode: 'name', directory: 'nested'}, undefined);
@@ -41,7 +41,7 @@ it('rejects new file scopes on old servers instead of accepting an ignored scope
     await client.search(project, {query: 'x', mode: 'path'}); expect(call).toHaveBeenCalledTimes(1);
 });
 it.each(['name', 'path', 'content'] as const)('rejects disabled file search in %s mode using the project transport metadata', async mode => {
-    const call = vi.fn(async () => result), metadata = vi.fn(async () => ({'itookit/pi-agent': {fileSearch: false, fileSearchVersion: 2}}));
+    const call = vi.fn(async () => result), metadata = vi.fn(async () => ({'itookit/cells': {fileSearch: false, fileSearchVersion: 2}}));
     const client = new MCPProjectClient({call, metadata, close: vi.fn()});
     await expect(client.search(project, {query: 'x', mode})).rejects.toMatchObject({code: 'ECAPABILITY'});
     expect(metadata).toHaveBeenCalledOnce(); expect(call).not.toHaveBeenCalled();

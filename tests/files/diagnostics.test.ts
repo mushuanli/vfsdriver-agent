@@ -8,7 +8,7 @@ it('logs request context and preserves the network cause without logging credent
         const transport = new HttpTransport({ endpoint: 'http://localhost:8080/', credential: () => 'secret-password',
             fetch: vi.fn(async () => { throw cause; }) });
         await expect(transport.json('v1/exports/project/list?path=src')).rejects.toMatchObject({ cause });
-        expect(log).toHaveBeenCalledWith('[nestos-node] Request failed', expect.objectContaining({
+        expect(log).toHaveBeenCalledWith('[cells] Request failed', expect.objectContaining({
             method: 'GET', route: '/v1/exports/project/list', path: 'src', sent: true,
         }), cause);
         expect(JSON.stringify(log.mock.calls)).not.toContain('secret-password');
